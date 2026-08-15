@@ -295,6 +295,9 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash }) {
         onSelect({ kind: d.count > 1 ? "cluster" : "commit", ...d })
       })
       .on("dblclick", (event) => event.stopPropagation())
+    commitDots.append("circle")
+      .attr("r", 14)
+      .attr("fill", "transparent")
     commitDots.filter((d) => d.isMerge).append("circle")
       .attr("r", (d) => innerR(d) + 6)
       .attr("fill", "#0b1220")
@@ -381,6 +384,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash }) {
     const zoom = d3.zoom()
       .scaleExtent([minK, maxK])
       .extent([[MARGIN.left, 0], [width, clipH]])
+      .clickDistance(6)
       .on("start", () => svg.style("cursor", "grabbing"))
       .on("end", () => svg.style("cursor", "grab"))
       .on("zoom", (event) => {

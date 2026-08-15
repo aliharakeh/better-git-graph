@@ -1,10 +1,9 @@
 import { FolderOpen, GitBranch, GitMerge, Loader2, Search, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { LoadRepo, SelectRepo } from "../wailsjs/go/main/App";
 import { TimelineGraph } from "./components/TimelineGraph";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card";
 import { Input } from "./components/ui/input";
 
 function laneName(name) {
@@ -61,6 +60,9 @@ export default function App() {
   const [authorQuery, setAuthorQuery] = useState("")
   const [focused, setFocused] = useState("")
   const [selected, setSelected] = useState(null)
+  const lastSelected = useRef(null)
+  if (selected) lastSelected.current = selected
+  const inspect = selected || lastSelected.current
   const [branchLimit, setBranchLimit] = useState(5)
   const [branchSort, setBranchSort] = useState("updated")
   const [visible, setVisible] = useState(() => new Set())
@@ -193,7 +195,7 @@ export default function App() {
         <span className="ml-2 text-xs text-muted-foreground">Network history of branch merges</span>
       </header>
 
-      <div className="no-drag flex min-h-0 flex-1">
+      <div className="no-drag relative flex min-h-0 flex-1 overflow-hidden">
         <aside className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-border p-4">
           <div className="space-y-2">
             <label className="text-xs font-medium text-muted-foreground">Repository</label>
@@ -342,56 +344,6 @@ export default function App() {
               </div>
             </div>
           )}
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Inspector</CardTitle>
-              <CardDescription>Click a commit or merge node</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {!selected ? (
-                <p className="text-xs text-muted-foreground">Nothing selected.</p>
-              ) : selected.kind === "merge" ? (
-                <dl className="space-y-2 text-xs">
-                  <Row label="Merge commit" value={selected.hash} mono />
-                  <Row label="Message" value={selected.subject || "—"} />
-                  <Row label="Source branch" value={selected.sourceBranch} />
-                  <Row label="Target branch" value={selected.targetBranch} />
-                  <Row label="Timestamp" value={<TimeChip ts={selected.timestamp} withDate />} />
-                  <Row label="Author" value={selected.author} />
-                  <Row label="Commit count" value={String(selected.commitCount)} />
-                </dl>
-              ) : selected.kind === "cluster" ? (
-                <dl className="space-y-2 text-xs">
-                  <Row label="Branch" value={selected.branch} />
-                  <Row label="Date" value={new Date(selected.timestamp).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })} />
-                  <Row label="Commits" value={String(selected.count)} />
-                  <div className="space-y-2">
-                    {(selected.commits || []).map((c) => (
-                      <div key={c.hash} className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <TimeChip ts={c.timestamp} />
-                          <AuthorChip name={authorName(c)} />
-                        </div>
-                        <dd className="min-w-0 break-words font-medium">
-                          {c.subject || c.hash}
-                          {c.isMerge ? <span className="ml-1 text-muted-foreground">merge</span> : null}
-                        </dd>
-                      </div>
-                    ))}
-                  </div>
-                </dl>
-              ) : (
-                <dl className="space-y-2 text-xs">
-                  <Row label="Commit" value={selected.hash} mono />
-                  <Row label="Message" value={selected.subject || "—"} />
-                  <Row label="Branch" value={selected.branch} />
-                  <Row label="Timestamp" value={<TimeChip ts={selected.timestamp} withDate />} />
-                  <Row label="Author" value={selected.author} />
-                </dl>
-              )}
-            </CardContent>
-          </Card>
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col">
@@ -452,6 +404,63 @@ export default function App() {
             )}
           </div>
         </main>
+
+        <aside
+          aria-hidden={!selected}
+          className={`absolute inset-y-0 right-0 z-10 w-80 overflow-y-auto border-l border-border bg-background p-4 shadow-lg transition-transform duration-300 ease-out ${
+            selected ? "translate-x-0" : "translate-x-full"
+          }`}
+        >
+          {inspect && (
+            <>
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="text-sm font-semibold">Inspector</h3>
+                <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => setSelected(null)} title="Close">
+                  <X className="size-4" />
+                </button>
+              </div>
+              {inspect.kind === "merge" ? (
+                <dl className="space-y-2 text-xs">
+                  <Row label="Merge commit" value={inspect.hash} mono />
+                  <Row label="Message" value={inspect.subject || "—"} />
+                  <Row label="Source branch" value={inspect.sourceBranch} />
+                  <Row label="Target branch" value={inspect.targetBranch} />
+                  <Row label="Timestamp" value={<TimeChip ts={inspect.timestamp} withDate />} />
+                  <Row label="Author" value={inspect.author} />
+                  <Row label="Commit count" value={String(inspect.commitCount)} />
+                </dl>
+              ) : inspect.kind === "cluster" ? (
+                <dl className="space-y-2 text-xs">
+                  <Row label="Branch" value={inspect.branch} />
+                  <Row label="Date" value={new Date(inspect.timestamp).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })} />
+                  <Row label="Commits" value={String(inspect.count)} />
+                  <div className="space-y-2">
+                    {(inspect.commits || []).map((c) => (
+                      <div key={c.hash} className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <TimeChip ts={c.timestamp} />
+                          <AuthorChip name={authorName(c)} />
+                        </div>
+                        <dd className="min-w-0 break-words font-medium">
+                          {c.subject || c.hash}
+                          {c.isMerge ? <span className="ml-1 text-muted-foreground">merge</span> : null}
+                        </dd>
+                      </div>
+                    ))}
+                  </div>
+                </dl>
+              ) : (
+                <dl className="space-y-2 text-xs">
+                  <Row label="Commit" value={inspect.hash} mono />
+                  <Row label="Message" value={inspect.subject || "—"} />
+                  <Row label="Branch" value={inspect.branch} />
+                  <Row label="Timestamp" value={<TimeChip ts={inspect.timestamp} withDate />} />
+                  <Row label="Author" value={inspect.author} />
+                </dl>
+              )}
+            </>
+          )}
+        </aside>
       </div>
     </div>
   )
