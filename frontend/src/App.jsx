@@ -1,5 +1,5 @@
-import { ExternalLink, FolderOpen, GitBranch, GitMerge, Loader2, RefreshCw, Search, X } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { ExternalLink, Filter, FolderOpen, GitBranch, GitMerge, Loader2, RefreshCw, Search, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ListBranches, LoadRepo, SelectRepo } from "../wailsjs/go/main/App";
 import { BrowserOpenURL } from "../wailsjs/runtime/runtime";
 import { TimelineGraph } from "./components/TimelineGraph";
@@ -30,6 +30,24 @@ const KIND_OPTS = [
   { id: "merge", label: "Merge" },
   { id: "normal", label: "Normal" },
 ]
+
+const BRANCH_OPTS = [
+  { id: "feature", label: "Feature" },
+  { id: "hotfix", label: "Hotfix" },
+  { id: "epic", label: "Epic" },
+  { id: "others", label: "Others" },
+]
+
+const ALL_KINDS = KIND_OPTS.map((k) => k.id)
+const ALL_BRANCH_KINDS = BRANCH_OPTS.map((k) => k.id)
+
+function branchKind(name) {
+  const n = laneName(name).toLowerCase()
+  if (/^(feature|feat)([/-]|$)/.test(n)) return "feature"
+  if (/^hotfix([/-]|$)/.test(n)) return "hotfix"
+  if (/^epic([/-]|$)/.test(n)) return "epic"
+  return "others"
+}
 
 function fmt(ts) {
   return new Date(ts).toLocaleString(undefined, {
@@ -146,8 +164,10 @@ export default function App() {
   const [branchSort, setBranchSort] = useState("updated")
   const [visible, setVisible] = useState(() => new Set())
   const [authors, setAuthors] = useState(() => new Set())
-  const [kinds, setKinds] = useState(() => new Set(["pr", "merge", "normal"]))
+  const [kinds, setKinds] = useState(() => new Set(ALL_KINDS))
+  const [branchKinds, setBranchKinds] = useState(() => new Set(ALL_BRANCH_KINDS))
   const [historyLeft, setHistoryLeft] = useState(0)
+  const filterRef = useRef(null)
   const visibleRef = useRef(visible)
   visibleRef.current = visible
   const pathRef = useRef(path)
@@ -157,6 +177,13 @@ export default function App() {
   const loadedRef = useRef({ from: 0, to: 0, branches: "", pastDone: false, futureDone: false, emptyPast: 0, emptyFuture: 0 })
   const wantRef = useRef({ from: 0, to: 0 })
   const filling = useRef(false)
+  useEffect(() => {
+    const close = (e) => {
+      if (filterRef.current && !filterRef.current.contains(e.target)) filterRef.current.open = false
+    }
+    document.addEventListener("pointerdown", close)
+    return () => document.removeEventListener("pointerdown", close)
+  }, [])
 
   async function load(nextPath, { reset = true, branches } = {}) {
     const target = (nextPath ?? path).trim()
@@ -184,7 +211,8 @@ export default function App() {
         setVisible(new Set(selected))
         setMsgQuery("")
         setAuthorQuery("")
-        setKinds(new Set(["pr", "merge", "normal"]))
+        setKinds(new Set(ALL_KINDS))
+        setBranchKinds(new Set(ALL_BRANCH_KINDS))
       } else if (!selected) {
         selected = [...visibleRef.current]
       }
@@ -354,7 +382,7 @@ export default function App() {
 
   const visibleGraph = useMemo(() => {
     if (!graph) return null
-    const names = rankedBranches.filter((b) => visible.has(b))
+    const names = rankedBranches.filter((b) => visible.has(b) && branchKinds.has(branchKind(b)))
     const shown = new Set(names)
     const msg = msgQuery.trim().toLowerCase()
     const match = (c, kind) => authors.has(authorName(c)) && kinds.has(kind) && (!msg || String(c.subject || "").toLowerCase().includes(msg))
@@ -368,7 +396,7 @@ export default function App() {
         targetBranch: laneName(m.targetBranch),
       })).filter((m) => shown.has(m.sourceBranch) && shown.has(m.targetBranch) && match(m, isPrSubject(m.subject) ? "pr" : "merge")),
     }
-  }, [graph, rankedBranches, visible, authors, kinds, msgQuery])
+  }, [graph, rankedBranches, visible, authors, kinds, branchKinds, msgQuery])
 
   function showTop(n) {
     const count = Math.min(Math.max(n, 0), rankedBranches.length)
@@ -582,19 +610,38 @@ export default function App() {
                     <X className="size-4" />
                   </button>
                 </div>
-                <div className="flex gap-1">
-                  {KIND_OPTS.map((k) => (
-                    <Button
-                      key={k.id}
-                      variant="outline"
-                      size="sm"
-                      className={`h-8 w-[4.5rem] ${kinds.has(k.id) ? "bg-primary text-primary-foreground hover:bg-primary/90" : ""}`}
-                      onClick={() => toggleIn(setKinds, k.id)}
-                    >
-                      {k.label}
-                    </Button>
-                  ))}
-                </div>
+                <details ref={filterRef} className="relative">
+                  <summary className="inline-flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-border bg-transparent px-3 text-xs font-medium hover:bg-muted [&::-webkit-details-marker]:hidden">
+                    <Filter className="size-4" />
+                    Filters
+                    <span className="tabular-nums text-muted-foreground">{kinds.size + branchKinds.size}/{ALL_KINDS.length + ALL_BRANCH_KINDS.length}</span>
+                  </summary>
+                  <div className="absolute right-0 z-20 mt-1 w-40 rounded-md border border-border bg-card p-1 shadow-lg">
+                    {KIND_OPTS.map((k) => (
+                      <label key={k.id} className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted">
+                        <input
+                          type="checkbox"
+                          checked={kinds.has(k.id)}
+                          onChange={() => toggleIn(setKinds, k.id)}
+                          className="size-3.5 shrink-0 accent-primary"
+                        />
+                        {k.label}
+                      </label>
+                    ))}
+                    <div className="my-1 border-t border-border" />
+                    {BRANCH_OPTS.map((k) => (
+                      <label key={k.id} className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted">
+                        <input
+                          type="checkbox"
+                          checked={branchKinds.has(k.id)}
+                          onChange={() => toggleIn(setBranchKinds, k.id)}
+                          className="size-3.5 shrink-0 accent-primary"
+                        />
+                        {k.label}
+                      </label>
+                    ))}
+                  </div>
+                </details>
                 <div className="flex gap-2 tabular-nums">
                   <Badge variant="outline" className="w-[7.5rem] justify-center">{visibleGraph.branches.length}/{rankedBranches.length} branches</Badge>
                   <Badge variant="outline" className="w-[6.25rem] justify-center">{visibleGraph.merges.length} merges</Badge>
