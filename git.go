@@ -61,6 +61,7 @@ type rawCommit struct {
 	subject  string
 	branch   string
 	assigned bool
+	on       []string
 }
 
 var (
@@ -114,7 +115,8 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 
 	order := sortBranchNames(keys(branchTips))
 	if !windowed {
-		assignLanes(order, branchTips, commits)
+		assignLanes(claimOrder(order), branchTips, commits)
+		assignOffSpineMerges(commits, order)
 		if only == nil {
 			// ponytail: name deleted lanes from merge msg / remotes / name-rev; reflog if still unnamed
 			order = append(order, ensureMergeSourceLanes(root, branchTips, commits)...)
@@ -124,18 +126,27 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 	nodes := make([]CommitNode, 0, len(commits))
 	merges := make([]MergeEvent, 0)
 	used := map[string]bool{}
+	known := map[string]bool{}
+	for _, name := range order {
+		known[laneName(name)] = true
+	}
 	for _, c := range commits {
 		if !c.assigned || c.branch == "" {
 			continue
 		}
 		iso := c.at.Format(time.RFC3339)
-		branch := c.branch
+		msgSrc, msgDst := parseMergeSubject(c.subject)
 		target := c.branch
-		if _, dst := parseMergeSubject(c.subject); dst != "" {
-			if d := laneName(dst); d != "" {
-				target = d
+		if d := knownLane(msgDst, known); d != "" {
+			target = d
+		} else if incomingMerge(c.subject) {
+			target = incomingDest(c, msgSrc, known)
+		} else if laneName(msgDst) == "" {
+			if s := knownLane(msgSrc, known); s != "" && s == laneName(c.branch) {
+				target = s
 			}
 		}
+		branch := c.branch
 		if len(c.parents) > 1 {
 			branch = target
 		}
@@ -154,18 +165,18 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 		}
 		for _, srcHash := range c.parents[1:] {
 			src := commits[srcHash]
-			srcBranch := ""
-			if src != nil {
+			srcBranch := laneName(msgSrc)
+			if srcBranch == "" && src != nil {
 				srcBranch = src.branch
-			}
-			if srcBranch == "" {
-				srcBranch, _ = parseMergeSubject(c.subject)
 			}
 			if srcBranch == "" {
 				srcBranch = shortHash(srcHash)
 			}
-			if laneName(srcBranch) == laneName(target) {
+			srcBranch = laneName(srcBranch)
+			if srcBranch == laneName(target) {
 				srcBranch = target
+			} else if srcBranch != "" {
+				used[srcBranch] = true
 			}
 			merges = append(merges, MergeEvent{
 				Hash:         c.hash,
@@ -189,6 +200,14 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 			branches = append(branches, lane)
 		}
 	}
+	var rest []string
+	for lane := range used {
+		if !seenBr[lane] {
+			rest = append(rest, lane)
+		}
+	}
+	sort.Strings(rest)
+	branches = append(branches, rest...)
 
 	sort.Slice(nodes, func(i, j int) bool {
 		if nodes[i].Timestamp == nodes[j].Timestamp {
@@ -381,28 +400,53 @@ func listCommits(root string, revs []string) (map[string]*rawCommit, error) {
 
 func listCommitsRange(root string, tips map[string]string, since, until time.Time) (map[string]*rawCommit, error) {
 	commits := map[string]*rawCommit{}
-	for _, name := range sortBranchNames(keys(tips)) {
-		args := []string{"log", "--first-parent", "--pretty=format:%H%x1f%P%x1f%an%x1f%aI%x1f%s", tips[name]}
-		if !since.IsZero() {
-			args = append(args, "--since="+since.Format(time.RFC3339))
-		}
-		if !until.IsZero() {
-			args = append(args, "--until="+until.Format(time.RFC3339))
-		}
-		chunk, err := parseLog(gitOutput(root, args...))
+	for _, name := range claimOrder(keys(tips)) {
+		lane := laneName(name)
+		chunk, err := parseLog(gitOutput(root, rangeLogArgs(tips[name], since, until, "--first-parent")...))
 		if err != nil {
 			return nil, err
 		}
 		for hash, c := range chunk {
-			if commits[hash] != nil {
+			if existing := commits[hash]; existing != nil {
+				markOn(existing, lane)
 				continue
 			}
 			c.assigned = true
-			c.branch = laneName(name)
+			c.branch = lane
+			markOn(c, lane)
+			commits[hash] = c
+		}
+		// first-parent misses merges that landed via "Merge branch 'dev' of remote into dev"
+		side, err := parseLog(gitOutput(root, rangeLogArgs(tips[name], since, until, "--merges")...))
+		if err != nil {
+			return nil, err
+		}
+		for hash, c := range side {
+			if existing := commits[hash]; existing != nil {
+				continue
+			}
+			if !belongsOnLane(c, lane, commits) {
+				continue
+			}
+			c.assigned = true
+			c.branch = lane
+			markOn(c, lane)
 			commits[hash] = c
 		}
 	}
 	return commits, nil
+}
+
+func rangeLogArgs(tip string, since, until time.Time, extra ...string) []string {
+	args := append([]string{"log", "--pretty=format:%H%x1f%P%x1f%an%x1f%aI%x1f%s"}, extra...)
+	args = append(args, tip)
+	if !since.IsZero() {
+		args = append(args, "--since="+since.Format(time.RFC3339))
+	}
+	if !until.IsZero() {
+		args = append(args, "--until="+until.Format(time.RFC3339))
+	}
+	return args
 }
 
 func parseLog(out string, err error) (map[string]*rawCommit, error) {
@@ -449,20 +493,89 @@ func parseLog(out string, err error) (map[string]*rawCommit, error) {
 
 func assignLanes(order []string, tips map[string]string, commits map[string]*rawCommit) {
 	for _, name := range order {
+		lane := laneName(name)
 		walk := tips[name]
 		for walk != "" {
 			c := commits[walk]
-			if c == nil || c.assigned {
+			if c == nil {
 				break
 			}
-			c.assigned = true
-			c.branch = laneName(name)
+			markOn(c, lane)
+			if !c.assigned {
+				c.assigned = true
+				c.branch = lane
+			}
 			if len(c.parents) == 0 {
 				break
 			}
 			walk = c.parents[0]
 		}
 	}
+}
+
+func assignOffSpineMerges(commits map[string]*rawCommit, lanes []string) {
+	known := map[string]bool{}
+	for _, name := range lanes {
+		known[laneName(name)] = true
+	}
+	for _, c := range commits {
+		if c.assigned || len(c.parents) < 2 {
+			continue
+		}
+		d := destLane(c.subject)
+		if known[d] {
+			c.assigned = true
+			c.branch = d
+			markOn(c, d)
+			continue
+		}
+		if d != "" {
+			continue
+		}
+		if p := commits[c.parents[0]]; p != nil && p.assigned && known[p.branch] {
+			c.assigned = true
+			c.branch = p.branch
+			markOn(c, p.branch)
+			continue
+		}
+		if len(known) != 1 || !(mergePR.MatchString(c.subject) || mergeBB.MatchString(c.subject)) {
+			continue
+		}
+		for lane := range known {
+			c.assigned = true
+			c.branch = lane
+			markOn(c, lane)
+		}
+	}
+}
+
+func destLane(subject string) string {
+	_, dst := parseMergeSubject(subject)
+	return dst
+}
+
+func belongsOnLane(c *rawCommit, lane string, commits map[string]*rawCommit) bool {
+	d := destLane(c.subject)
+	if d == lane {
+		return true
+	}
+	if d != "" {
+		return false
+	}
+	s := strings.ToLower(strings.TrimSpace(c.subject))
+	l := strings.ToLower(lane)
+	if strings.HasSuffix(s, " into "+l) || strings.HasSuffix(s, " into '"+l+"'") {
+		return true
+	}
+	if len(c.parents) > 0 {
+		if p := commits[c.parents[0]]; p != nil && p.assigned && p.branch == lane {
+			return true
+		}
+	}
+	if mergePR.MatchString(c.subject) || mergeBB.MatchString(c.subject) {
+		return true
+	}
+	return false
 }
 
 func ensureMergeSourceLanes(root string, tips map[string]string, commits map[string]*rawCommit) []string {
@@ -525,7 +638,7 @@ func mergeSourceName(subject, rev string) (name string, fromMsg bool) {
 }
 
 func cleanLaneName(name string) string {
-	name = stripNameRev(stripRemotePrefix(name))
+	name = stripRemotePrefix(stripNameRev(name))
 	if name == "" || name == "undefined" {
 		return ""
 	}
@@ -590,21 +703,24 @@ func countExclusive(from, exclude string, commits map[string]*rawCommit) int {
 func parseMergeSubject(subject string) (src, dst string) {
 	s := strings.TrimSpace(subject)
 	if m := mergeBranch.FindStringSubmatch(s); m != nil {
-		return stripRemotePrefix(m[1]), strings.Trim(m[2], "'")
+		return cleanLaneName(m[1]), cleanLaneName(strings.Trim(m[2], "'"))
 	}
 	if m := mergeTag.FindStringSubmatch(s); m != nil {
-		return m[1], strings.Trim(m[2], "'")
+		return cleanLaneName(m[1]), cleanLaneName(strings.Trim(m[2], "'"))
 	}
 	if m := mergePR.FindStringSubmatch(s); m != nil {
-		return m[1], ""
+		return cleanLaneName(m[1]), ""
 	}
 	if m := mergeBB.FindStringSubmatch(s); m != nil {
-		return stripRemotePrefix(m[1]), ""
+		return cleanLaneName(m[1]), ""
 	}
 	return "", ""
 }
 
 func stripNameRev(name string) string {
+	name = strings.TrimPrefix(name, "refs/heads/")
+	name = strings.TrimPrefix(name, "refs/remotes/")
+	name = strings.TrimPrefix(name, "refs/tags/")
 	name = strings.TrimPrefix(name, "remotes/")
 	name = strings.TrimPrefix(name, "tags/")
 	return nameRevJunk.ReplaceAllString(name, "")
@@ -639,6 +755,70 @@ func sortBranchNames(names []string) []string {
 		return names[i] < names[j]
 	})
 	return names
+}
+
+func claimOrder(names []string) []string {
+	rank := map[string]int{"main": 1, "master": 1, "trunk": 1, "develop": 1, "dev": 1}
+	out := append([]string{}, names...)
+	sort.Slice(out, func(i, j int) bool {
+		iTrunk := rank[laneName(out[i])]
+		jTrunk := rank[laneName(out[j])]
+		if iTrunk != jTrunk {
+			return iTrunk < jTrunk
+		}
+		return out[i] < out[j]
+	})
+	return out
+}
+
+func knownLane(name string, known map[string]bool) string {
+	name = laneName(name)
+	if name != "" && known[name] {
+		return name
+	}
+	return ""
+}
+
+func incomingMerge(subject string) bool {
+	return mergeBB.MatchString(subject) || mergePR.MatchString(subject)
+}
+
+func incomingDest(c *rawCommit, msgSrc string, known map[string]bool) string {
+	src := laneName(msgSrc)
+	var other []string
+	for _, lane := range c.on {
+		if known[lane] && lane != src {
+			other = append(other, lane)
+		}
+	}
+	if t := pickTrunk(other); t != "" {
+		return t
+	}
+	if len(other) > 0 {
+		sort.Strings(other)
+		return other[0]
+	}
+	return c.branch
+}
+
+func pickTrunk(lanes []string) string {
+	for _, t := range []string{"dev", "develop", "main", "master", "trunk"} {
+		for _, l := range lanes {
+			if l == t {
+				return t
+			}
+		}
+	}
+	return ""
+}
+
+func markOn(c *rawCommit, lane string) {
+	for _, x := range c.on {
+		if x == lane {
+			return
+		}
+	}
+	c.on = append(c.on, lane)
 }
 
 func keys(m map[string]string) []string {

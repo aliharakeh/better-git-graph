@@ -32,7 +32,7 @@ function dbez(p0, p1, p2, p3, t) {
 }
 
 function laneName(name) {
-  return String(name || "").replace(/^(origin|upstream)\//, "")
+  return String(name || "").replace(/^refs\/(heads|remotes|tags)\//, "").replace(/^(origin|upstream)\//, "")
 }
 
 function localDay(ts) {
@@ -122,7 +122,10 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     const clusterMap = clusterByDay(commits)
     const clusters = [...clusterMap.values()]
     const [winStart, winEnd] = viewWindow(commits, rangeStart, rangeEnd)
-    const yOf = (name) => MARGIN.top + branches.indexOf(name) * LANE_H + LANE_H / 2
+    const yOf = (name) => {
+      const i = branches.indexOf(name)
+      return i < 0 ? undefined : MARGIN.top + i * LANE_H + LANE_H / 2
+    }
     const color = d3.scaleOrdinal(COLORS).domain(branches)
     const width = size.w
     const plotBottom = MARGIN.top + branches.length * LANE_H
@@ -161,8 +164,8 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       const dstC = clusterMap.get(clusterKey(m.targetBranch, m.timestamp))
       const x1pos = xz(new Date(srcC?.timestamp || m.timestamp))
       const x2pos = xz(new Date(dstC?.timestamp || m.timestamp))
-      const y1 = yOf(m.sourceBranch)
-      const y2 = yOf(m.targetBranch)
+      const y2 = yOf(m.targetBranch) ?? yOf(m.sourceBranch)
+      const y1 = branches.includes(m.sourceBranch) ? yOf(m.sourceBranch) : y2
       if (y1 === y2) {
         const w = 56
         const h = 44
@@ -225,9 +228,9 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
 
     const merges = graph.merges
       .map((m) => ({ ...m, sourceBranch: laneName(m.sourceBranch), targetBranch: laneName(m.targetBranch) }))
-      .filter((m) => branches.includes(m.targetBranch) && branches.includes(m.sourceBranch))
+      .filter((m) => branches.includes(m.targetBranch) || branches.includes(m.sourceBranch))
     for (const m of merges) {
-      clusterMap.get(clusterKey(m.targetBranch, m.timestamp))?.merges.push(m)
+      (clusterMap.get(clusterKey(m.targetBranch, m.timestamp)) || clusterMap.get(clusterKey(m.sourceBranch, m.timestamp)))?.merges.push(m)
     }
 
     const branchLines = plot.append("g")
@@ -336,7 +339,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       })
 
     const srcNodes = plot.append("g").selectAll("circle")
-      .data(merges.filter((m) => m.sourceBranch !== m.targetBranch && !clusterMap.get(clusterKey(m.sourceBranch, m.timestamp))))
+      .data(merges.filter((m) => branches.includes(m.sourceBranch) && branches.includes(m.targetBranch) && m.sourceBranch !== m.targetBranch && !clusterMap.get(clusterKey(m.sourceBranch, m.timestamp))))
       .join("circle")
       .attr("r", 5)
       .attr("fill", (d) => color(d.sourceBranch))
@@ -493,7 +496,7 @@ function TipBody({ d }) {
       {items.slice(0, 8).map((c, i) => (
         <div key={c.hash || i} className="flex items-start gap-2">
           <TimeChip ts={c.timestamp} withDate={items.length === 1} />
-          <span className="min-w-0 break-words text-foreground">
+          <span className={`min-w-0 break-words ${c.isMerge || c.sourceBranch ? "font-medium text-cyan-300" : "text-foreground"}`}>
             {c.subject || c.hash}
             {c.tags?.length ? <span className="ml-1 font-semibold text-amber-400">{c.tags.join(" · ")}</span> : null}
           </span>

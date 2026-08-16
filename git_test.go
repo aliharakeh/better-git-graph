@@ -56,6 +56,7 @@ func TestParseMergeSubject(t *testing.T) {
 		{"Merge branch 'main' of https://github.com/acme/repo", "main", ""},
 		{"Merge branch 'foo' of github.com:acme/repo into develop", "foo", "develop"},
 		{"Merge branch 'foo' into 'bar'", "foo", "bar"},
+		{"Merge branch 'refs/heads/dev' into epic/TR-2369-rework", "dev", "epic/TR-2369-rework"},
 		{"Merge tag 'v1.2.3' into main", "v1.2.3", "main"},
 		{"Merged in feature/x (pull request #9)", "feature/x", ""},
 		{"regular commit", "", ""},
@@ -215,32 +216,37 @@ func TestLoadGraphRemoteIntoSameBranch(t *testing.T) {
 	write(t, dir, "remote.txt", "ok\n")
 	git("add", "remote.txt")
 	git("commit", "-m", "remote work")
-	tip := gitOut(t, dir, "rev-parse", "HEAD")
 	git("checkout", "main")
-	git("update-ref", "refs/remotes/origin/main", tip)
+	git("merge", "--no-ff", "-m", "Merge branch 'main' of origin into main", "tmp")
 	git("branch", "-D", "tmp")
-	git("merge", "--no-ff", "-m", "Merge remote-tracking branch 'origin/main' into main", "origin/main")
+	git("checkout", "-b", "TR-2546")
+	write(t, dir, "feat.txt", "ok\n")
+	git("add", "feat.txt")
+	git("commit", "-m", "ticket work")
+	git("checkout", "main")
+	write(t, dir, "later.txt", "x\n")
+	git("add", "later.txt")
+	git("commit", "-m", "main later")
 
-	g, err := LoadGraph(dir)
+	g, err := loadGraph(dir, []string{"main", "TR-2546"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if contains(g.Branches, "origin/main") {
-		t.Fatalf("branches = %v, origin/main should stay on main", g.Branches)
-	}
-	if len(g.Merges) != 1 {
-		t.Fatalf("merges = %d, want 1: %+v", len(g.Merges), g.Merges)
-	}
-	m := g.Merges[0]
-	if m.SourceBranch != "main" || m.TargetBranch != "main" {
-		t.Fatalf("merge %s -> %s, want main -> main", m.SourceBranch, m.TargetBranch)
-	}
+	found := false
 	for _, c := range g.Commits {
-		if c.Branch == "origin/main" {
-			t.Fatalf("commit on origin/main: %+v", c)
+		if strings.Contains(c.Subject, "into main") {
+			found = true
+			if c.Branch != "main" {
+				t.Fatalf("remote-into-local merge on %q, want main", c.Branch)
+			}
 		}
-		if c.IsMerge && c.Branch != "main" {
-			t.Fatalf("merge commit on %q, want main", c.Branch)
+	}
+	if !found {
+		t.Fatalf("missing same-lane merge: %+v", subjects(g))
+	}
+	for _, m := range g.Merges {
+		if strings.Contains(m.Subject, "into main") && (m.SourceBranch != "main" || m.TargetBranch != "main") {
+			t.Fatalf("merge %s -> %s, want main -> main", m.SourceBranch, m.TargetBranch)
 		}
 	}
 }
@@ -372,16 +378,252 @@ func TestLoadGraphHidesMergedBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if contains(g.Branches, "feature/login") {
-		t.Fatalf("branches = %v, hidden feature/login should stay unloaded", g.Branches)
+	if !contains(g.Branches, "feature/login") {
+		t.Fatalf("branches = %v, want feature/login comet lane", g.Branches)
 	}
 	for _, c := range g.Commits {
 		if c.Subject == "add login" {
 			t.Fatalf("hidden branch commit still loaded: %+v", c)
 		}
 	}
-	if len(g.Merges) != 1 || g.Merges[0].TargetBranch != "main" {
+	if len(g.Merges) != 1 || g.Merges[0].TargetBranch != "main" || g.Merges[0].SourceBranch != "feature/login" {
 		t.Fatalf("merges = %+v", g.Merges)
+	}
+}
+
+func TestLoadGraphOffSpineMergeIntoLane(t *testing.T) {
+	for _, want := range []string{
+		"Merge branch 'refs/heads/feature' into main",
+		"Merged in feature (pull request #114)",
+	} {
+		t.Run(want, func(t *testing.T) {
+			dir, git := testRepo(t)
+			write(t, dir, "README.md", "a\n")
+			git("add", "README.md")
+			git("commit", "-m", "init")
+			base := gitOut(t, dir, "rev-parse", "HEAD")
+			git("checkout", "-b", "feature")
+			write(t, dir, "feat.txt", "ok\n")
+			git("add", "feat.txt")
+			git("commit", "-m", "feat")
+			git("checkout", "main")
+			git("merge", "--no-ff", "-m", want, "feature")
+			git("branch", "-D", "feature")
+			git("checkout", "-b", "bob", base)
+			write(t, dir, "bob.txt", "b\n")
+			git("add", "bob.txt")
+			git("commit", "-m", "bob")
+			git("merge", "--no-ff", "-m", "Merge branch 'main' of origin into main", "main")
+			git("checkout", "main")
+			git("reset", "--hard", "bob")
+			git("branch", "-D", "bob")
+
+			since := time.Now().UTC().Add(-24 * time.Hour)
+			until := time.Now().UTC().Add(time.Hour)
+			g, err := loadGraphAt(dir, []string{"main"}, since, until)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !hasSubject(g, want) {
+				t.Fatalf("missing off-spine merge: %+v", subjects(g))
+			}
+			if hasSubject(g, "feat") {
+				t.Fatalf("source branch commits landed on main: %+v", subjects(g))
+			}
+			for _, c := range g.Commits {
+				if c.Branch != "main" {
+					t.Fatalf("commit %q on %q, want main", c.Subject, c.Branch)
+				}
+			}
+			found := false
+			for _, m := range g.Merges {
+				if m.SourceBranch == "feature" && m.TargetBranch == "main" && m.Subject == want {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("merges = %+v", g.Merges)
+			}
+		})
+	}
+}
+
+func TestLoadGraphMergeFromTrunkIntoFeature(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "README.md", "a\n")
+	git("add", "README.md")
+	git("commit", "-m", "init")
+	git("checkout", "-b", "TR-2546")
+	write(t, dir, "feat.txt", "ok\n")
+	git("add", "feat.txt")
+	git("commit", "-m", "ticket work")
+	git("checkout", "main")
+	write(t, dir, "dev.txt", "d\n")
+	git("add", "dev.txt")
+	git("commit", "-m", "dev only")
+	git("checkout", "TR-2546")
+	git("merge", "--no-ff", "-m", "Merge branch 'refs/heads/main' into epic/TR-2369-rework", "main")
+
+	g, err := loadGraph(dir, []string{"main", "TR-2546"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range g.Merges {
+		if strings.Contains(m.Subject, "refs/heads/main") {
+			found = true
+			if m.SourceBranch != "main" {
+				t.Fatalf("source = %q, want main (from message)", m.SourceBranch)
+			}
+			if m.TargetBranch != "TR-2546" {
+				t.Fatalf("target = %q, want TR-2546 (displayed lane), not epic", m.TargetBranch)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("missing merge from dev: %+v", g.Merges)
+	}
+	for _, c := range g.Commits {
+		if c.IsMerge && strings.Contains(c.Subject, "refs/heads/main") && c.Branch != "TR-2546" {
+			t.Fatalf("merge commit on %q, want TR-2546", c.Branch)
+		}
+	}
+}
+
+func TestLoadGraphMergedInShowsOnReceiver(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "README.md", "a\n")
+	git("add", "README.md")
+	git("commit", "-m", "init")
+	git("checkout", "-b", "TR-2546")
+	write(t, dir, "feat.txt", "ok\n")
+	git("add", "feat.txt")
+	git("commit", "-m", "ticket work")
+	git("checkout", "main")
+	git("merge", "--no-ff", "-m", "Merged in TR-2546 (pull request #9)", "TR-2546")
+
+	g, err := loadGraph(dir, []string{"main", "TR-2546"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range g.Commits {
+		if strings.Contains(c.Subject, "Merged in TR-2546") && c.Branch != "main" {
+			t.Fatalf("Merged in commit on %q, want main (receiver), not source", c.Branch)
+		}
+	}
+	found := false
+	for _, m := range g.Merges {
+		if strings.Contains(m.Subject, "Merged in TR-2546") {
+			found = true
+			if m.SourceBranch != "TR-2546" || m.TargetBranch != "main" {
+				t.Fatalf("merge %s -> %s, want TR-2546 -> main", m.SourceBranch, m.TargetBranch)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("missing Merged in event: %+v", g.Merges)
+	}
+}
+
+func TestLoadGraphRemoteIntoFeatureStaysOnFeature(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "README.md", "a\n")
+	git("add", "README.md")
+	git("commit", "-m", "init")
+	git("checkout", "-b", "TR-2546")
+	write(t, dir, "feat.txt", "ok\n")
+	git("add", "feat.txt")
+	git("commit", "-m", "ticket work")
+	git("checkout", "main")
+	write(t, dir, "dev.txt", "d\n")
+	git("add", "dev.txt")
+	git("commit", "-m", "dev only")
+	git("checkout", "TR-2546")
+	git("merge", "--no-ff", "-m", "Merge remote-tracking branch 'origin/main' into TR-2546", "main")
+
+	g, err := loadGraph(dir, []string{"main", "TR-2546"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range g.Commits {
+		if strings.Contains(c.Subject, "origin/main") {
+			found = true
+			if c.Branch != "TR-2546" {
+				t.Fatalf("remote-into-feature merge on %q, want TR-2546", c.Branch)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("missing remote-into-feature merge: %+v", subjects(g))
+	}
+	for _, m := range g.Merges {
+		if strings.Contains(m.Subject, "origin/main") {
+			if m.SourceBranch != "main" || m.TargetBranch != "TR-2546" {
+				t.Fatalf("merge %s -> %s, want main -> TR-2546", m.SourceBranch, m.TargetBranch)
+			}
+		}
+	}
+}
+
+func TestLoadGraphFeatureKeepsCommitsWhenTrunkAdded(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "README.md", "a\n")
+	git("add", "README.md")
+	git("commit", "-m", "init")
+	git("checkout", "-b", "TR-2546")
+	write(t, dir, "feat.txt", "ok\n")
+	git("add", "feat.txt")
+	git("commit", "-m", "ticket work")
+	git("checkout", "main")
+	write(t, dir, "dev.txt", "d\n")
+	git("add", "dev.txt")
+	git("commit", "-m", "dev only")
+
+	onlyFeat, err := loadGraph(dir, []string{"TR-2546"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasSubject(onlyFeat, "ticket work") || !hasSubject(onlyFeat, "init") {
+		t.Fatalf("feature-only missing commits: %+v", subjects(onlyFeat))
+	}
+
+	both, err := loadGraph(dir, []string{"main", "TR-2546"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bySubj := map[string]string{}
+	for _, c := range both.Commits {
+		bySubj[c.Subject] = c.Branch
+	}
+	if bySubj["ticket work"] != "TR-2546" {
+		t.Fatalf("ticket work on %q, want TR-2546; lanes=%v", bySubj["ticket work"], bySubj)
+	}
+	if bySubj["init"] != "TR-2546" {
+		t.Fatalf("shared init stolen by %q", bySubj["init"])
+	}
+	if bySubj["dev only"] != "main" {
+		t.Fatalf("dev only on %q, want main", bySubj["dev only"])
+	}
+
+	since := time.Now().UTC().Add(-24 * time.Hour)
+	until := time.Now().UTC().Add(time.Hour)
+	windowed, err := loadGraphAt(dir, []string{"main", "TR-2546"}, since, until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bySubj = map[string]string{}
+	for _, c := range windowed.Commits {
+		bySubj[c.Subject] = c.Branch
+	}
+	if bySubj["ticket work"] != "TR-2546" {
+		t.Fatalf("windowed ticket work on %q", bySubj["ticket work"])
+	}
+	if bySubj["init"] != "TR-2546" {
+		t.Fatalf("windowed shared init stolen by %q", bySubj["init"])
+	}
+	if bySubj["dev only"] != "main" {
+		t.Fatalf("windowed dev only on %q", bySubj["dev only"])
 	}
 }
 

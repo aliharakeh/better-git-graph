@@ -8,7 +8,7 @@ import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 
 function laneName(name) {
-  return String(name || "").replace(/^(origin|upstream)\//, "")
+  return String(name || "").replace(/^refs\/(heads|remotes|tags)\//, "").replace(/^(origin|upstream)\//, "")
 }
 
 function authorName(c) {
@@ -428,15 +428,16 @@ export default function App() {
     const names = rankedBranches.filter((b) => visible.has(b) && branchKinds.has(branchKind(b)))
     const shown = new Set(names)
     const match = (c, kind) => authors.has(authorName(c)) && kinds.has(kind)
+    const merges = (graph.merges || []).map((m) => ({
+      ...m,
+      sourceBranch: laneName(m.sourceBranch),
+      targetBranch: laneName(m.targetBranch),
+    })).filter((m) => (shown.has(m.targetBranch) || shown.has(m.sourceBranch)) && match(m, isPrSubject(m.subject) ? "pr" : "merge"))
     return {
       ...graph,
       branches: names,
       commits: (graph.commits || []).map((c) => ({ ...c, branch: laneName(c.branch) })).filter((c) => shown.has(c.branch) && match(c, commitKind(c))),
-      merges: (graph.merges || []).map((m) => ({
-        ...m,
-        sourceBranch: laneName(m.sourceBranch),
-        targetBranch: laneName(m.targetBranch),
-      })).filter((m) => shown.has(m.sourceBranch) && shown.has(m.targetBranch) && match(m, isPrSubject(m.subject) ? "pr" : "merge")),
+      merges,
     }
   }, [graph, rankedBranches, visible, authors, kinds, branchKinds])
 
@@ -479,6 +480,7 @@ export default function App() {
     const next = new Set(visible)
     if (next.has(name)) next.delete(name)
     else next.add(name)
+    setBranchLimit(next.size)
     applyVisible(next)
   }
 
@@ -832,7 +834,7 @@ export default function App() {
               {inspect.kind === "merge" ? (
                 <dl className="space-y-2 text-xs">
                   <Row label="Merge commit" value={inspect.hash} mono action={<CommitLink prefix={graph?.commitUrl} hash={inspect.hash} />} />
-                  <Row label="Message" value={inspect.subject || "—"} />
+                  <Row label="Message" value={<span className="text-cyan-300">{inspect.subject || "—"}</span>} />
                   {inspect.tags?.length ? <Row label="Tags" value={inspect.tags.join(" · ")} /> : null}
                   <Row label="Source branch" value={inspect.sourceBranch} />
                   <Row label="Target branch" value={inspect.targetBranch} />
@@ -853,9 +855,9 @@ export default function App() {
                           <AuthorChip name={authorName(c)} />
                           <CommitLink prefix={graph?.commitUrl} hash={c.hash} />
                         </div>
-                        <dd className="min-w-0 break-words font-medium">
+                        <dd className={`min-w-0 break-words font-medium ${c.isMerge ? "text-cyan-300" : ""}`}>
                           {c.subject || c.hash}
-                          {c.isMerge ? <span className="ml-1 text-muted-foreground">merge</span> : null}
+                          {c.isMerge ? <span className="ml-1 text-cyan-300/70">merge</span> : null}
                           {c.tags?.length ? <span className="ml-1 text-amber-400">{c.tags.join(" · ")}</span> : null}
                         </dd>
                       </div>
@@ -865,7 +867,7 @@ export default function App() {
               ) : (
                 <dl className="space-y-2 text-xs">
                   <Row label="Commit" value={inspect.hash} mono action={<CommitLink prefix={graph?.commitUrl} hash={inspect.hash} />} />
-                  <Row label="Message" value={inspect.subject || "—"} />
+                  <Row label="Message" value={inspect.isMerge ? <span className="text-cyan-300">{inspect.subject || "—"}</span> : (inspect.subject || "—")} />
                   <Row label="Branch" value={inspect.branch} />
                   {inspect.tags?.length ? <Row label="Tags" value={inspect.tags.join(" · ")} /> : null}
                   <Row label="Timestamp" value={<TimeChip ts={inspect.timestamp} withDate />} />
