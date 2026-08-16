@@ -1,6 +1,7 @@
-import { FolderOpen, GitBranch, GitMerge, Loader2, RefreshCw, Search, X } from "lucide-react";
+import { ExternalLink, FolderOpen, GitBranch, GitMerge, Loader2, RefreshCw, Search, X } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { ListBranches, LoadRepo, SelectRepo } from "../wailsjs/go/main/App";
+import { BrowserOpenURL } from "../wailsjs/runtime/runtime";
 import { TimelineGraph } from "./components/TimelineGraph";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -639,7 +640,7 @@ export default function App() {
               </div>
               {inspect.kind === "merge" ? (
                 <dl className="space-y-2 text-xs">
-                  <Row label="Merge commit" value={inspect.hash} mono />
+                  <Row label="Merge commit" value={inspect.hash} mono action={<CommitLink prefix={graph?.commitUrl} hash={inspect.hash} />} />
                   <Row label="Message" value={inspect.subject || "—"} />
                   {inspect.tags?.length ? <Row label="Tags" value={inspect.tags.join(" · ")} /> : null}
                   <Row label="Source branch" value={inspect.sourceBranch} />
@@ -659,6 +660,7 @@ export default function App() {
                         <div className="flex items-center gap-2">
                           <TimeChip ts={c.timestamp} />
                           <AuthorChip name={authorName(c)} />
+                          <CommitLink prefix={graph?.commitUrl} hash={c.hash} />
                         </div>
                         <dd className="min-w-0 break-words font-medium">
                           {c.subject || c.hash}
@@ -671,7 +673,7 @@ export default function App() {
                 </dl>
               ) : (
                 <dl className="space-y-2 text-xs">
-                  <Row label="Commit" value={inspect.hash} mono />
+                  <Row label="Commit" value={inspect.hash} mono action={<CommitLink prefix={graph?.commitUrl} hash={inspect.hash} />} />
                   <Row label="Message" value={inspect.subject || "—"} />
                   <Row label="Branch" value={inspect.branch} />
                   {inspect.tags?.length ? <Row label="Tags" value={inspect.tags.join(" · ")} /> : null}
@@ -687,12 +689,29 @@ export default function App() {
   )
 }
 
-function Row({ label, value, mono }) {
+function Row({ label, value, mono, action }) {
   return (
     <div>
       <dt className="text-muted-foreground">{label}</dt>
-      <dd className={mono ? "break-all font-mono text-[11px]" : "break-words font-medium"}>{value}</dd>
+      <dd className={`flex items-start gap-1.5 ${mono ? "break-all font-mono text-[11px]" : "break-words font-medium"}`}>
+        <span className="min-w-0">{value}</span>
+        {action}
+      </dd>
     </div>
+  )
+}
+
+function CommitLink({ prefix, hash }) {
+  if (!prefix || !hash) return null
+  return (
+    <button
+      type="button"
+      className="shrink-0 text-muted-foreground hover:text-foreground"
+      title="Open commit"
+      onClick={() => BrowserOpenURL(prefix + hash)}
+    >
+      <ExternalLink className="size-3.5" />
+    </button>
   )
 }
 

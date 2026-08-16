@@ -34,10 +34,11 @@ type MergeEvent struct {
 }
 
 type RepoGraph struct {
-	Path     string       `json:"path"`
-	Branches []string     `json:"branches"`
-	Commits  []CommitNode `json:"commits"`
-	Merges   []MergeEvent `json:"merges"`
+	Path      string       `json:"path"`
+	CommitURL string       `json:"commitUrl,omitempty"`
+	Branches  []string     `json:"branches"`
+	Commits   []CommitNode `json:"commits"`
+	Merges    []MergeEvent `json:"merges"`
 }
 
 type BranchInfo struct {
@@ -91,7 +92,7 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 	if only != nil {
 		branchTips = filterTips(branchTips, only)
 		if len(branchTips) == 0 {
-			return &RepoGraph{Path: root}, nil
+			return &RepoGraph{Path: root, CommitURL: commitURLPrefix(toWebBase(remoteURL(root)))}, nil
 		}
 		revs = values(branchTips)
 	}
@@ -198,7 +199,7 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 		return merges[i].Timestamp < merges[j].Timestamp
 	})
 
-	return &RepoGraph{Path: root, Branches: branches, Commits: nodes, Merges: merges}, nil
+	return &RepoGraph{Path: root, CommitURL: commitURLPrefix(toWebBase(remoteURL(root))), Branches: branches, Commits: nodes, Merges: merges}, nil
 }
 
 func ListBranches(path string) ([]BranchInfo, error) {
@@ -639,6 +640,65 @@ func values(m map[string]string) []string {
 		out = append(out, v)
 	}
 	return out
+}
+
+func remoteURL(root string) string {
+	if u, err := gitOutput(root, "remote", "get-url", "origin"); err == nil && u != "" {
+		return u
+	}
+	names, err := gitOutput(root, "remote")
+	if err != nil || names == "" {
+		return ""
+	}
+	u, err := gitOutput(root, "remote", "get-url", strings.Fields(names)[0])
+	if err != nil {
+		return ""
+	}
+	return u
+}
+
+func toWebBase(remote string) string {
+	u := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(remote), "/"), ".git")
+	if u == "" {
+		return ""
+	}
+	if rest, ok := strings.CutPrefix(u, "git@"); ok {
+		host, path, ok := strings.Cut(rest, ":")
+		if !ok || host == "" || path == "" {
+			return ""
+		}
+		return "https://" + host + "/" + strings.TrimPrefix(path, "/")
+	}
+	if rest, ok := strings.CutPrefix(u, "ssh://"); ok {
+		rest = strings.TrimPrefix(rest, "git@")
+		return "https://" + rest
+	}
+	scheme, rest, ok := strings.Cut(u, "://")
+	if !ok || (scheme != "http" && scheme != "https") {
+		return ""
+	}
+	if at := strings.LastIndex(rest, "@"); at >= 0 {
+		rest = rest[at+1:]
+	}
+	return scheme + "://" + rest
+}
+
+func commitURLPrefix(base string) string {
+	if base == "" {
+		return ""
+	}
+	host := base
+	if _, rest, ok := strings.Cut(base, "://"); ok {
+		host, _, _ = strings.Cut(rest, "/")
+	}
+	switch {
+	case host == "bitbucket.org" || strings.HasSuffix(host, ".bitbucket.org"):
+		return base + "/commits/"
+	case host == "gitlab.com" || strings.Contains(host, "gitlab"):
+		return base + "/-/commit/"
+	default:
+		return base + "/commit/"
+	}
 }
 
 func shortHash(h string) string {

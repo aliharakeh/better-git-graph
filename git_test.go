@@ -9,6 +9,42 @@ import (
 	"time"
 )
 
+func TestCommitURLPrefix(t *testing.T) {
+	cases := []struct{ remote, hash, want string }{
+		{"git@github.com:acme/repo.git", "abc", "https://github.com/acme/repo/commit/abc"},
+		{"https://github.com/acme/repo.git", "abc", "https://github.com/acme/repo/commit/abc"},
+		{"https://user:token@github.com/acme/repo.git", "abc", "https://github.com/acme/repo/commit/abc"},
+		{"https://gitlab.com/acme/repo.git", "abc", "https://gitlab.com/acme/repo/-/commit/abc"},
+		{"git@bitbucket.org:acme/repo.git", "abc", "https://bitbucket.org/acme/repo/commits/abc"},
+		{"", "abc", ""},
+	}
+	for _, c := range cases {
+		p := commitURLPrefix(toWebBase(c.remote))
+		got := p
+		if p != "" {
+			got = p + c.hash
+		}
+		if got != c.want {
+			t.Fatalf("%q: got %q want %q", c.remote, got, c.want)
+		}
+	}
+}
+
+func TestLoadGraphCommitURL(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "README.md", "a\n")
+	git("add", "README.md")
+	git("commit", "-m", "init")
+	git("remote", "add", "origin", "git@github.com:acme/repo.git")
+	g, err := LoadGraph(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.CommitURL != "https://github.com/acme/repo/commit/" {
+		t.Fatalf("commitUrl = %q", g.CommitURL)
+	}
+}
+
 func TestParseMergeSubject(t *testing.T) {
 	cases := []struct {
 		in, src, dst string

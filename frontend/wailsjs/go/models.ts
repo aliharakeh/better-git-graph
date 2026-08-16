@@ -66,6 +66,7 @@ export namespace main {
 	}
 	export class RepoGraph {
 	    path: string;
+	    commitUrl?: string;
 	    branches: string[];
 	    commits: CommitNode[];
 	    merges: MergeEvent[];
@@ -77,6 +78,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.path = source["path"];
+	        this.commitUrl = source["commitUrl"];
 	        this.branches = source["branches"];
 	        this.commits = this.convertValues(source["commits"], CommitNode);
 	        this.merges = this.convertValues(source["merges"], MergeEvent);
