@@ -64,6 +64,28 @@ export namespace main {
 	        this.commitCount = source["commitCount"];
 	    }
 	}
+	export class RemoteInfo {
+	    name: string;
+	    url: string;
+	    web?: string;
+	    host?: string;
+	    hasToken: boolean;
+	    ssh: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new RemoteInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.url = source["url"];
+	        this.web = source["web"];
+	        this.host = source["host"];
+	        this.hasToken = source["hasToken"];
+	        this.ssh = source["ssh"];
+	    }
+	}
 	export class RepoGraph {
 	    path: string;
 	    commitUrl?: string;

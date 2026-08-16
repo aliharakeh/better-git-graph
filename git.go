@@ -8,16 +8,17 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
 type CommitNode struct {
-	Hash      string `json:"hash"`
-	Branch    string `json:"branch"`
-	Timestamp string `json:"timestamp"`
-	Author    string `json:"author"`
-	Subject   string `json:"subject"`
+	Hash      string   `json:"hash"`
+	Branch    string   `json:"branch"`
+	Timestamp string   `json:"timestamp"`
+	Author    string   `json:"author"`
+	Subject   string   `json:"subject"`
 	IsMerge   bool     `json:"isMerge"`
 	Tags      []string `json:"tags,omitempty"`
 }
@@ -211,6 +212,12 @@ func ListBranches(path string) ([]BranchInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	sort.Slice(metas, func(i, j int) bool {
+		if !metas[i].at.Equal(metas[j].at) {
+			return metas[i].at.After(metas[j].at)
+		}
+		return metas[i].name < metas[j].name
+	})
 	out := make([]BranchInfo, 0, len(metas))
 	for _, m := range metas {
 		info := BranchInfo{Name: m.name}
@@ -219,7 +226,6 @@ func ListBranches(path string) ([]BranchInfo, error) {
 		}
 		out = append(out, info)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }
 
@@ -255,7 +261,7 @@ func listBranchTips(root string) (map[string]string, error) {
 }
 
 func listBranchMeta(root string) ([]branchMeta, error) {
-	const format = "--format=%(refname:short)%00%(objectname)%00%(committerdate:iso-strict)"
+	const format = "--format=%(refname:short)%00%(objectname)%00%(authordate:unix)%00%(committerdate:unix)"
 	out, err := gitOutput(root, "for-each-ref", format, "refs/heads")
 	if err != nil {
 		return nil, err
@@ -273,8 +279,14 @@ func listBranchMeta(root string) ([]branchMeta, error) {
 		if existing, ok := tips[short]; !ok {
 			meta.name = short
 			tips[short] = meta
-		} else if existing.hash != meta.hash {
-			tips[name] = meta
+		} else {
+			if meta.at.After(existing.at) {
+				existing.at = meta.at
+				tips[short] = existing
+			}
+			if existing.hash != meta.hash {
+				tips[name] = meta
+			}
 		}
 	}
 	outMetas := make([]branchMeta, 0, len(tips))
@@ -324,12 +336,15 @@ func parseRefMeta(out string) map[string]branchMeta {
 			continue
 		}
 		meta := branchMeta{name: parts[0], hash: parts[1]}
-		if len(parts) > 2 && parts[2] != "" {
-			if at, err := time.Parse(time.RFC3339, parts[2]); err == nil {
-				meta.at = at
-			} else if at, err := time.Parse(time.RFC3339Nano, parts[2]); err == nil {
-				meta.at = at
+		unix := int64(0)
+		for _, p := range parts[2:] {
+			n, err := strconv.ParseInt(p, 10, 64)
+			if err == nil && n > unix {
+				unix = n
 			}
+		}
+		if unix > 0 {
+			meta.at = time.Unix(unix, 0)
 		}
 		tips[parts[0]] = meta
 	}

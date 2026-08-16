@@ -1,6 +1,6 @@
-import { ChevronLeft, ChevronRight, ExternalLink, Filter, FolderOpen, GitBranch, GitMerge, Loader2, RefreshCw, Search, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, CloudDownload, ExternalLink, Filter, FolderOpen, GitBranch, GitMerge, Loader2, RefreshCw, Search, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ListBranches, LoadRepo, SelectRepo } from "../wailsjs/go/main/App";
+import { FetchRemote, GetRemote, ListBranches, LoadRepo, SaveRemoteToken, SelectRepo } from "../wailsjs/go/main/App";
 import { BrowserOpenURL } from "../wailsjs/runtime/runtime";
 import { TimelineGraph } from "./components/TimelineGraph";
 import { Badge } from "./components/ui/badge";
@@ -155,6 +155,10 @@ export default function App() {
   const [graph, setGraph] = useState(null)
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(false)
+  const [remote, setRemote] = useState(null)
+  const [token, setToken] = useState("")
+  const [fetching, setFetching] = useState(false)
+  const [remoteMsg, setRemoteMsg] = useState("")
   const [query, setQuery] = useState("")
   const [msgQuery, setMsgQuery] = useState("")
   const [hitIndex, setHitIndex] = useState(-1)
@@ -237,6 +241,11 @@ export default function App() {
       loadedRef.current = { from, to, branches: branchKey(selected), pastDone: false, futureDone: false, emptyPast: 0, emptyFuture: 0 }
       setGraph(data)
       setPath(data.path || target)
+      try {
+        setRemote(await GetRemote(data.path || target))
+      } catch {
+        setRemote(null)
+      }
       if (reset) {
         setAuthors(new Set((data.commits || []).map(authorName)))
       } else {
@@ -251,6 +260,7 @@ export default function App() {
       if (reset) {
         setGraph(null)
         setCatalog([])
+        setRemote(null)
       }
       setError(wailsError(err))
     } finally {
@@ -357,9 +367,35 @@ export default function App() {
     }
   }
 
+  async function saveAuth() {
+    if (!remote?.host) return
+    try {
+      await SaveRemoteToken(remote.host, token)
+      setToken("")
+      setRemoteMsg(token.trim() ? `Saved token for ${remote.host}` : `Removed token for ${remote.host}`)
+      setRemote(await GetRemote(path))
+    } catch (err) {
+      setError(wailsError(err))
+    }
+  }
+
+  async function fetchNow() {
+    setFetching(true)
+    setRemoteMsg("")
+    try {
+      await FetchRemote(path)
+      setRemoteMsg(`Fetched ${remote?.name || "origin"}`)
+      await load(path)
+    } catch (err) {
+      setError(wailsError(err))
+    } finally {
+      setFetching(false)
+    }
+  }
+
   const rankedBranches = useMemo(() => {
     const names = lanesByUpdated(catalog)
-    if (branchSort === "alpha") return names.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
+    if (branchSort === "alpha") return [...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
     return names
   }, [catalog, branchSort])
 
@@ -484,6 +520,51 @@ export default function App() {
             </Button>
             {error && <p className="text-xs text-destructive">{error}</p>}
           </div>
+
+          {remote && (
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-muted-foreground">Remote</label>
+              <div className="flex items-center gap-2">
+                <span className="truncate font-mono text-[11px] text-muted-foreground">{remote.name}</span>
+                {remote.web ? (
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-center gap-1 truncate text-left text-xs text-primary hover:underline"
+                    title={remote.url}
+                    onClick={() => BrowserOpenURL(remote.web)}
+                  >
+                    <span className="truncate">{remote.web.replace(/^https:\/\//, "")}</span>
+                    <ExternalLink className="size-3 shrink-0" />
+                  </button>
+                ) : (
+                  <span className="truncate font-mono text-[11px]">{remote.url}</span>
+                )}
+              </div>
+              <Button className="w-full" variant="outline" onClick={fetchNow} disabled={fetching || loading} title={remote.ssh ? "Uses your SSH keys" : remote.hasToken ? `Uses saved token for ${remote.host}` : "Uses git credentials"}>
+                {fetching ? <Loader2 className="animate-spin" /> : <CloudDownload />}
+                {fetching ? "Fetching…" : `Fetch ${remote.name}`}
+              </Button>
+              {remote.host && (
+                <div className="flex gap-2">
+                  <Input
+                    type="password"
+                    autoComplete="off"
+                    value={token}
+                    placeholder={remote.hasToken ? "Token saved — paste to replace" : "PAT / access token"}
+                    onChange={(e) => setToken(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && saveAuth()}
+                  />
+                  <Button variant="outline" size="sm" className="h-9 shrink-0" onClick={saveAuth} disabled={!token.trim() && !remote.hasToken}>
+                    {token.trim() ? "Save" : "Clear"}
+                  </Button>
+                </div>
+              )}
+              {remote.ssh && (
+                <p className="text-[11px] text-muted-foreground">Fetch uses SSH keys. A token is stored for this host for HTTPS/API later.</p>
+              )}
+              {remoteMsg && <p className="text-[11px] text-muted-foreground">{remoteMsg}</p>}
+            </div>
+          )}
 
           {rankedBranches.length > 0 && (
             <div className="space-y-2">

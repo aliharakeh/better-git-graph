@@ -411,6 +411,44 @@ func TestListBranches(t *testing.T) {
 	}
 }
 
+func TestListBranchesSortedByUpdated(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "README.md", "a\n")
+	git("add", "README.md")
+	commitAt(t, dir, time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC), "init")
+
+	git("checkout", "-b", "feature/old")
+	write(t, dir, "old.txt", "x\n")
+	git("add", "old.txt")
+	commitAt(t, dir, time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC), "old")
+
+	git("checkout", "-b", "zzz-newest")
+	write(t, dir, "new.txt", "y\n")
+	git("add", "new.txt")
+	commitAt(t, dir, time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC), "new")
+
+	git("checkout", "-b", "rebased-stale")
+	write(t, dir, "rebase.txt", "z\n")
+	git("add", "rebase.txt")
+	commitAtSplit(t, dir, time.Date(2020, 1, 1, 12, 0, 0, 0, time.UTC), time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC), "rebased")
+
+	got, err := ListBranches(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) < 4 || got[0].Name != "rebased-stale" {
+		t.Fatalf("order = %v, want rebased-stale first (newest committer date)", namesOf(got))
+	}
+}
+
+func namesOf(list []BranchInfo) []string {
+	out := make([]string, 0, len(list))
+	for _, b := range list {
+		out = append(out, b.Name)
+	}
+	return out
+}
+
 func TestLoadGraphTags(t *testing.T) {
 	dir, git := testRepo(t)
 	write(t, dir, "README.md", "a\n")
@@ -531,17 +569,20 @@ func write(t *testing.T, dir, name, body string) {
 }
 
 func commitAt(t *testing.T, dir string, at time.Time, msg string) {
+	commitAtSplit(t, dir, at, at, msg)
+}
+
+func commitAtSplit(t *testing.T, dir string, author, committer time.Time, msg string) {
 	t.Helper()
 	cmd := exec.Command("git", "commit", "-m", msg)
 	cmd.Dir = dir
-	stamp := at.Format(time.RFC3339)
 	cmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=Test",
 		"GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=Test",
 		"GIT_COMMITTER_EMAIL=test@example.com",
-		"GIT_AUTHOR_DATE="+stamp,
-		"GIT_COMMITTER_DATE="+stamp,
+		"GIT_AUTHOR_DATE="+author.Format(time.RFC3339),
+		"GIT_COMMITTER_DATE="+committer.Format(time.RFC3339),
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git commit: %v\n%s", err, out)

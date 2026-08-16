@@ -35,6 +35,43 @@ func (a *App) ListBranches(path string) ([]BranchInfo, error) {
 	return ListBranches(path)
 }
 
+func (a *App) GetRemote(path string) (*RemoteInfo, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("enter a repository path")
+	}
+	root, err := gitRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := listRemote(root)
+	if err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+func (a *App) SaveRemoteToken(host string, token string) error {
+	return saveToken(host, token)
+}
+
+func (a *App) FetchRemote(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("enter a repository path")
+	}
+	root, err := gitRoot(path)
+	if err != nil {
+		return err
+	}
+	info, err := listRemote(root)
+	if err != nil {
+		return err
+	}
+	tokens, _ := loadTokens()
+	return fetchRemote(root, info, tokens[info.Host])
+}
+
 func (a *App) LoadRepo(path string, branches []string, since string, until string) (*RepoGraph, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
