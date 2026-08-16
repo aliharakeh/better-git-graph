@@ -1,4 +1,4 @@
-import { ExternalLink, Filter, FolderOpen, GitBranch, GitMerge, Loader2, RefreshCw, Search, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink, Filter, FolderOpen, GitBranch, GitMerge, Loader2, RefreshCw, Search, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ListBranches, LoadRepo, SelectRepo } from "../wailsjs/go/main/App";
 import { BrowserOpenURL } from "../wailsjs/runtime/runtime";
@@ -61,6 +61,11 @@ function fmt(ts) {
 
 function fmtTime(ts) {
   return new Date(ts).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+}
+
+function localDay(ts) {
+  const d = new Date(ts)
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
 }
 
 function wailsError(err) {
@@ -152,6 +157,8 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [query, setQuery] = useState("")
   const [msgQuery, setMsgQuery] = useState("")
+  const [hitIndex, setHitIndex] = useState(-1)
+  const [jumpTo, setJumpTo] = useState(null)
   const [authorQuery, setAuthorQuery] = useState("")
   const [focused, setFocused] = useState("")
   const [selected, setSelected] = useState(null)
@@ -384,8 +391,7 @@ export default function App() {
     if (!graph) return null
     const names = rankedBranches.filter((b) => visible.has(b) && branchKinds.has(branchKind(b)))
     const shown = new Set(names)
-    const msg = msgQuery.trim().toLowerCase()
-    const match = (c, kind) => authors.has(authorName(c)) && kinds.has(kind) && (!msg || String(c.subject || "").toLowerCase().includes(msg))
+    const match = (c, kind) => authors.has(authorName(c)) && kinds.has(kind)
     return {
       ...graph,
       branches: names,
@@ -396,7 +402,36 @@ export default function App() {
         targetBranch: laneName(m.targetBranch),
       })).filter((m) => shown.has(m.sourceBranch) && shown.has(m.targetBranch) && match(m, isPrSubject(m.subject) ? "pr" : "merge")),
     }
-  }, [graph, rankedBranches, visible, authors, kinds, branchKinds, msgQuery])
+  }, [graph, rankedBranches, visible, authors, kinds, branchKinds])
+
+  const searchHits = useMemo(() => {
+    const msg = msgQuery.trim().toLowerCase()
+    if (!msg || !visibleGraph) return []
+    return visibleGraph.commits
+      .filter((c) => String(c.subject || "").toLowerCase().includes(msg) || (c.tags || []).some((t) => String(t).toLowerCase().includes(msg)))
+      .sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp))
+  }, [visibleGraph, msgQuery])
+  const matchHashes = useMemo(() => searchHits.map((c) => c.hash), [searchHits])
+  const curHit = hitIndex >= 0 && hitIndex < searchHits.length ? hitIndex : -1
+
+  function setCommitSearch(value) {
+    setMsgQuery(value)
+    setHitIndex(-1)
+  }
+
+  function goHit(dir) {
+    const n = searchHits.length
+    if (!n) return
+    const i = curHit < 0 ? (dir > 0 ? 0 : n - 1) : (curHit + dir + n) % n
+    const c = searchHits[i]
+    const day = localDay(c.timestamp)
+    const commits = visibleGraph.commits
+      .filter((x) => x.branch === c.branch && localDay(x.timestamp) === day)
+      .sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp))
+    setHitIndex(i)
+    setSelected(commits.length > 1 ? { kind: "cluster", ...c, count: commits.length, commits } : { kind: "commit", ...c })
+    setJumpTo({ hash: c.hash, n: (jumpTo?.n || 0) + 1 })
+  }
 
   function showTop(n) {
     const count = Math.min(Math.max(n, 0), rankedBranches.length)
@@ -598,17 +633,43 @@ export default function App() {
                 <Button variant="outline" size="icon" className="size-8" onClick={() => load(path, { reset: false })} disabled={loading} title="Refresh graph">
                   <RefreshCw className={loading ? "animate-spin" : ""} />
                 </Button>
-                <div className="relative w-52">
-                  <Search className="pointer-events-none absolute left-2.5 top-2 size-4 text-muted-foreground" />
-                  <Input className="h-8 pl-8 pr-8 text-xs" value={msgQuery} placeholder="Search commits…" onChange={(e) => setMsgQuery(e.target.value)} />
-                  <button
-                    className={`absolute right-2 top-1.5 text-muted-foreground ${msgQuery ? "" : "invisible"}`}
-                    onClick={() => setMsgQuery("")}
-                    tabIndex={msgQuery ? 0 : -1}
-                    aria-hidden={!msgQuery}
-                  >
-                    <X className="size-4" />
-                  </button>
+                <div className="flex items-center gap-1">
+                  <div className="relative w-52">
+                    <Search className="pointer-events-none absolute left-2.5 top-2 size-4 text-muted-foreground" />
+                    <Input
+                      className="h-8 pl-8 pr-8 text-xs"
+                      value={msgQuery}
+                      placeholder="Search commits…"
+                      onChange={(e) => setCommitSearch(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault()
+                          goHit(e.shiftKey ? -1 : 1)
+                        }
+                      }}
+                    />
+                    <button
+                      className={`absolute right-2 top-1.5 text-muted-foreground ${msgQuery ? "" : "invisible"}`}
+                      onClick={() => setCommitSearch("")}
+                      tabIndex={msgQuery ? 0 : -1}
+                      aria-hidden={!msgQuery}
+                    >
+                      <X className="size-4" />
+                    </button>
+                  </div>
+                  {msgQuery.trim() ? (
+                    <>
+                      <span className="min-w-10 text-center font-mono text-[11px] tabular-nums text-muted-foreground">
+                        {searchHits.length ? (curHit < 0 ? searchHits.length : `${curHit + 1}/${searchHits.length}`) : "0"}
+                      </span>
+                      <Button variant="outline" size="icon" className="size-8" disabled={!searchHits.length} onClick={() => goHit(-1)} title="Previous match">
+                        <ChevronLeft />
+                      </Button>
+                      <Button variant="outline" size="icon" className="size-8" disabled={!searchHits.length} onClick={() => goHit(1)} title="Next match">
+                        <ChevronRight />
+                      </Button>
+                    </>
+                  ) : null}
                 </div>
                 <details ref={filterRef} className="relative">
                   <summary className="inline-flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-border bg-transparent px-3 text-xs font-medium hover:bg-muted [&::-webkit-details-marker]:hidden">
@@ -662,6 +723,8 @@ export default function App() {
                 graph={visibleGraph}
                 focused={highlight}
                 selectedHash={selected?.hash}
+                matchHashes={matchHashes}
+                jumpTo={msgQuery.trim() ? jumpTo : null}
                 onSelect={setSelected}
                 rangeStart={axisRange?.[0]}
                 rangeEnd={axisRange?.[1]}
@@ -703,7 +766,7 @@ export default function App() {
                   <Row label="Commits" value={String(inspect.count)} />
                   <div className="space-y-2">
                     {(inspect.commits || []).map((c) => (
-                      <div key={c.hash} className="space-y-1">
+                      <div key={c.hash} className={`space-y-1 ${c.hash === inspect.hash ? "rounded-md bg-primary/15 p-1.5" : ""}`}>
                         <div className="flex items-center gap-2">
                           <TimeChip ts={c.timestamp} />
                           <AuthorChip name={authorName(c)} />

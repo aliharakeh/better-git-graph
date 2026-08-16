@@ -72,12 +72,13 @@ function clusterByDay(commits) {
   return map
 }
 
-export function TimelineGraph({ graph, focused, onSelect, selectedHash, rangeStart, rangeEnd, onViewChange }) {
+export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHashes, jumpTo, rangeStart, rangeEnd, onViewChange }) {
   const wrapRef = useRef(null)
   const svgRef = useRef(null)
   const axisRef = useRef(null)
   const zoomRef = useRef(d3.zoomIdentity)
   const zoomKeyRef = useRef("")
+  const jumpKeyRef = useRef("")
   const viewCb = useRef(onViewChange)
   viewCb.current = onViewChange
   const [size, setSize] = useState({ w: 900, h: 480 })
@@ -271,10 +272,12 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, rangeSta
       setTip({ x: px + 12, y: py + 12, d })
     }
     const isSelected = (d) => d.hash === selectedHash || d.commits?.some((c) => c.hash === selectedHash)
+    const matchSet = new Set(matchHashes || [])
+    const isHit = (d) => matchSet.has(d.hash) || d.commits?.some((c) => matchSet.has(c.hash))
     const innerR = (d) => (d.count > 1 ? 9 : 5) + (isSelected(d) ? 2 : 0)
 
     const commitDots = plot.append("g").selectAll("g").data(clusters).join("g")
-      .attr("opacity", (d) => 0.9 * dim(d.branch))
+      .attr("opacity", (d) => (matchSet.size && !isHit(d) ? 0.2 : 0.9) * dim(d.branch))
       .style("cursor", "pointer")
       .on("pointerenter", (event, d) => showTip(event, d))
       .on("pointermove", (event) => {
@@ -294,6 +297,11 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, rangeSta
     commitDots.append("circle")
       .attr("r", 14)
       .attr("fill", "transparent")
+    commitDots.filter((d) => matchSet.size && isHit(d)).append("circle")
+      .attr("r", (d) => innerR(d) + 7)
+      .attr("fill", "none")
+      .attr("stroke", "#fbbf24")
+      .attr("stroke-width", 2.5)
     commitDots.filter((d) => d.isMerge).append("circle")
       .attr("r", (d) => innerR(d) + 6)
       .attr("fill", "#0b1220")
@@ -332,7 +340,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, rangeSta
       .join("circle")
       .attr("r", 5)
       .attr("fill", (d) => color(d.sourceBranch))
-      .attr("opacity", (d) => 0.9 * dim(d.sourceBranch))
+      .attr("opacity", (d) => (matchSet.size && !matchSet.has(d.hash) ? 0.2 : 0.9) * dim(d.sourceBranch))
       .style("cursor", "pointer")
       .on("pointerenter", (event, d) => showTip(event, d))
       .on("pointermove", (event) => {
@@ -415,12 +423,26 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, rangeSta
       zoomRef.current = d3.zoomIdentity
       svg.transition().duration(200).call(zoom.transform, d3.zoomIdentity)
     })
+    const jumpKey = jumpTo?.hash ? `${jumpTo.hash}:${jumpTo.n}` : ""
+    if (!jumpKey) jumpKeyRef.current = ""
+    if (jumpKey && jumpKey !== jumpKeyRef.current) {
+      jumpKeyRef.current = jumpKey
+      const hit = clusters.find((d) => d.hash === jumpTo.hash || d.commits?.some((c) => c.hash === jumpTo.hash))
+        || commits.find((c) => c.hash === jumpTo.hash)
+      if (hit) {
+        const k = zoomRef.current.k
+        const mid = MARGIN.left + innerW / 2
+        zoomRef.current = clamp(d3.zoomIdentity
+          .translate(mid - k * x0(new Date(hit.timestamp)), clipH / 2 - yOf(hit.branch))
+          .scale(k))
+      }
+    }
     svg.call(zoom.transform, zoomRef.current)
 
     return () => {
       d3.select(svgEl).on(".zoom", null).on("dblclick", null)
     }
-  }, [graph, related, size, selectedHash, onSelect, rangeStart, rangeEnd])
+  }, [graph, related, size, selectedHash, matchHashes, jumpTo, onSelect, rangeStart, rangeEnd])
 
   return (
     <div ref={wrapRef} className="relative h-full w-full overflow-hidden">
