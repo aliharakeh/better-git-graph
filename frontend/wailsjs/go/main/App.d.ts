@@ -4,6 +4,6 @@ import {main} from '../models';
 
 export function ListBranches(arg1:string):Promise<Array<main.BranchInfo>>;
 
-export function LoadRepo(arg1:string,arg2:Array<string>):Promise<main.RepoGraph>;
+export function LoadRepo(arg1:string,arg2:Array<string>,arg3:string,arg4:string):Promise<main.RepoGraph>;
 
 export function SelectRepo():Promise<string>;

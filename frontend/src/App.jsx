@@ -1,4 +1,4 @@
-import { FolderOpen, GitBranch, GitMerge, Loader2, Search, X } from "lucide-react";
+import { FolderOpen, GitBranch, GitMerge, Loader2, RefreshCw, Search, X } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { ListBranches, LoadRepo, SelectRepo } from "../wailsjs/go/main/App";
 import { TimelineGraph } from "./components/TimelineGraph";
@@ -60,6 +60,72 @@ function lanesByUpdated(list) {
   return [...latest.keys()].sort((a, b) => latest.get(b) - latest.get(a))
 }
 
+const CHUNK_MONTHS = 5
+
+function addMonths(ms, n) {
+  const d = new Date(ms)
+  d.setMonth(d.getMonth() + n)
+  return +d
+}
+
+function iso(ms) {
+  return new Date(ms).toISOString()
+}
+
+function mergeGraphs(prev, chunk) {
+  if (!prev) return chunk
+  if (!chunk) return prev
+  const seen = new Set((prev.commits || []).map((c) => c.hash))
+  const commits = [...(prev.commits || [])]
+  for (const c of chunk.commits || []) {
+    if (!seen.has(c.hash)) commits.push(c)
+  }
+  const mseen = new Set((prev.merges || []).map((m) => `${m.hash}:${m.sourceHash}`))
+  const merges = [...(prev.merges || [])]
+  for (const m of chunk.merges || []) {
+    const k = `${m.hash}:${m.sourceHash}`
+    if (!mseen.has(k)) merges.push(m)
+  }
+  const bseen = new Set(prev.branches || [])
+  const branches = [...(prev.branches || [])]
+  for (const b of chunk.branches || []) {
+    if (!bseen.has(b)) branches.push(b)
+  }
+  return { ...prev, branches, commits, merges }
+}
+
+function branchKey(names) {
+  return [...names].sort().join("\n")
+}
+
+function chunkEmpty(chunk) {
+  return !(chunk?.commits?.length || chunk?.merges?.length)
+}
+
+function viewCovered(loaded, from, to) {
+  if (!loaded.from && !loaded.to) return false
+  const slack = 1000
+  return (from >= loaded.from - slack || loaded.pastDone) && (to <= loaded.to + slack || loaded.futureDone)
+}
+
+function monthQueue(loaded, want) {
+  let n = 0
+  if (!loaded.pastDone) {
+    for (let t = loaded.from, i = 0; t > want.from && i < 200; i++) {
+      t = addMonths(t, -CHUNK_MONTHS)
+      n++
+    }
+  }
+  const cap = Math.min(want.to, Date.now())
+  if (!loaded.futureDone) {
+    for (let t = loaded.to, i = 0; t < cap && i < 200; i++) {
+      t = addMonths(t, CHUNK_MONTHS)
+      n++
+    }
+  }
+  return n
+}
+
 export default function App() {
   const [path, setPath] = useState("")
   const [graph, setGraph] = useState(null)
@@ -74,15 +140,22 @@ export default function App() {
   if (selected) lastSelected.current = selected
   const inspect = selected || lastSelected.current
   const [catalog, setCatalog] = useState([])
+  const [axisRange, setAxisRange] = useState(null)
   const [branchLimit, setBranchLimit] = useState(5)
   const [branchSort, setBranchSort] = useState("updated")
   const [visible, setVisible] = useState(() => new Set())
   const [authors, setAuthors] = useState(() => new Set())
   const [kinds, setKinds] = useState(() => new Set(["pr", "merge", "normal"]))
+  const [historyLeft, setHistoryLeft] = useState(0)
   const visibleRef = useRef(visible)
   visibleRef.current = visible
+  const pathRef = useRef(path)
+  pathRef.current = path
   const loadSeq = useRef(0)
   const reloadTimer = useRef(0)
+  const loadedRef = useRef({ from: 0, to: 0, branches: "", pastDone: false, futureDone: false, emptyPast: 0, emptyFuture: 0 })
+  const wantRef = useRef({ from: 0, to: 0 })
+  const filling = useRef(false)
 
   async function load(nextPath, { reset = true, branches } = {}) {
     const target = (nextPath ?? path).trim()
@@ -114,8 +187,18 @@ export default function App() {
       } else if (!selected) {
         selected = [...visibleRef.current]
       }
-      const data = await LoadRepo(target, selected)
+      const now = Date.now()
+      const viewTo = now
+      const viewFrom = addMonths(now, -CHUNK_MONTHS)
+      const from = reset || !loadedRef.current.from ? addMonths(now, -CHUNK_MONTHS) : loadedRef.current.from
+      const to = reset || !loadedRef.current.to ? now : loadedRef.current.to
+      if (reset || !loadedRef.current.from) {
+        setAxisRange([viewFrom, viewTo])
+        wantRef.current = { from: viewFrom, to: viewTo }
+      }
+      const data = await LoadRepo(target, selected, iso(from), iso(to))
       if (gen !== loadSeq.current) return
+      loadedRef.current = { from, to, branches: branchKey(selected), pastDone: false, futureDone: false, emptyPast: 0, emptyFuture: 0 }
       setGraph(data)
       setPath(data.path || target)
       if (reset) {
@@ -145,6 +228,86 @@ export default function App() {
     const run = () => load(path, { reset: false, branches: [...next] })
     if (debounce) reloadTimer.current = window.setTimeout(run, 150)
     else run()
+  }
+
+  function addAuthors(commits) {
+    setAuthors((prev) => {
+      const next = new Set(prev)
+      for (const c of commits || []) next.add(authorName(c))
+      return next
+    })
+  }
+
+  async function ensureRange(viewFrom, viewTo) {
+    if (filling.current) return
+    const selected = [...visibleRef.current]
+    const key = branchKey(selected)
+    const loaded = loadedRef.current
+    if (loaded.branches && loaded.branches !== key) return
+    wantRef.current = { from: viewFrom, to: viewTo }
+    const left = monthQueue(loaded, wantRef.current)
+    if (viewCovered(loaded, viewFrom, viewTo)) {
+      if (!filling.current) setHistoryLeft(0)
+      return
+    }
+    setHistoryLeft(left)
+    filling.current = true
+    const gen = loadSeq.current
+    try {
+      while (gen === loadSeq.current) {
+        const cur = loadedRef.current
+        const want = wantRef.current
+        const queued = monthQueue(cur, want)
+        setHistoryLeft(queued)
+        if (cur.branches !== key || viewCovered(cur, want.from, want.to) || !queued) break
+        const target = pathRef.current.trim()
+        if (!target || !selected.length) break
+        if (cur.from > want.from && !cur.pastDone) {
+          const until = cur.from
+          const since = addMonths(until, -CHUNK_MONTHS)
+          const chunk = await LoadRepo(target, selected, iso(since), iso(until))
+          if (gen !== loadSeq.current) return
+          const empty = chunkEmpty(chunk)
+          const emptyPast = empty ? cur.emptyPast + 1 : 0
+          if (!empty) {
+            setGraph((prev) => mergeGraphs(prev, chunk))
+            addAuthors(chunk?.commits)
+          }
+          loadedRef.current = { ...loadedRef.current, from: since, emptyPast, pastDone: emptyPast >= 3 }
+          continue
+        }
+        if (cur.to < want.to && !cur.futureDone) {
+          const since = cur.to
+          const until = Math.min(addMonths(since, CHUNK_MONTHS), Date.now())
+          if (until <= since) {
+            loadedRef.current = { ...loadedRef.current, futureDone: true }
+            break
+          }
+          const chunk = await LoadRepo(target, selected, iso(since), iso(until))
+          if (gen !== loadSeq.current) return
+          const empty = chunkEmpty(chunk)
+          const emptyFuture = empty ? cur.emptyFuture + 1 : 0
+          if (!empty) {
+            setGraph((prev) => mergeGraphs(prev, chunk))
+            addAuthors(chunk?.commits)
+          }
+          loadedRef.current = { ...loadedRef.current, to: until, emptyFuture, futureDone: emptyFuture >= 3 }
+          continue
+        }
+        break
+      }
+    } catch (err) {
+      if (gen === loadSeq.current) setError(wailsError(err))
+    } finally {
+      filling.current = false
+      setHistoryLeft(0)
+    }
+  }
+
+  function onViewChange(from, to) {
+    wantRef.current = { from, to }
+    if (filling.current) return
+    ensureRange(from, to)
   }
 
   async function browse() {
@@ -389,12 +552,23 @@ export default function App() {
 
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center gap-3 border-b border-border px-4 py-2">
-            <div className="min-w-0 shrink">
-              <div className="text-sm font-medium">Network timeline</div>
-              <div className="truncate text-[11px] text-muted-foreground">Scroll to zoom · drag to pan · double-click to reset</div>
+            <div className="flex min-w-0 items-end gap-2">
+              <div className="min-w-0 shrink">
+                <div className="text-sm font-medium">Network timeline</div>
+                <div className="truncate text-[11px] text-muted-foreground">Scroll to zoom · drag to pan · double-click to reset</div>
+              </div>
+              {historyLeft > 0 && (
+                <Badge className="mb-px shrink-0 gap-1.5 border-amber-400 bg-amber-400 text-slate-950">
+                  <Loader2 className="size-3 animate-spin" />
+                  Loading history…
+                </Badge>
+              )}
             </div>
             {graph && (
               <div className="ml-auto flex shrink-0 items-center gap-3">
+                <Button variant="outline" size="icon" className="size-8" onClick={() => load(path, { reset: false })} disabled={loading} title="Refresh graph">
+                  <RefreshCw className={loading ? "animate-spin" : ""} />
+                </Button>
                 <div className="relative w-52">
                   <Search className="pointer-events-none absolute left-2.5 top-2 size-4 text-muted-foreground" />
                   <Input className="h-8 pl-8 pr-8 text-xs" value={msgQuery} placeholder="Search commits…" onChange={(e) => setMsgQuery(e.target.value)} />
@@ -441,6 +615,9 @@ export default function App() {
                 focused={highlight}
                 selectedHash={selected?.hash}
                 onSelect={setSelected}
+                rangeStart={axisRange?.[0]}
+                rangeEnd={axisRange?.[1]}
+                onViewChange={onViewChange}
               />
             )}
           </div>

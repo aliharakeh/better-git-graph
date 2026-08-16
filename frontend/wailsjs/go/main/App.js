@@ -6,8 +6,8 @@ export function ListBranches(arg1) {
   return window['go']['main']['App']['ListBranches'](arg1);
 }
 
-export function LoadRepo(arg1, arg2) {
-  return window['go']['main']['App']['LoadRepo'](arg1, arg2);
+export function LoadRepo(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['LoadRepo'](arg1, arg2, arg3, arg4);
 }
 
 export function SelectRepo() {

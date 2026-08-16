@@ -375,6 +375,42 @@ func TestListBranches(t *testing.T) {
 	}
 }
 
+func TestLoadGraphTimeRange(t *testing.T) {
+	dir, git := testRepo(t)
+	old := time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC)
+	recent := time.Now().UTC().AddDate(0, -1, 0)
+	write(t, dir, "README.md", "a\n")
+	git("add", "README.md")
+	commitAt(t, dir, old, "old work")
+	write(t, dir, "new.txt", "b\n")
+	git("add", "new.txt")
+	commitAt(t, dir, recent, "new work")
+
+	since := time.Now().UTC().AddDate(0, -3, 0)
+	until := time.Now().UTC().Add(time.Hour)
+	g, err := loadGraphAt(dir, []string{"main"}, since, until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasSubject(g, "new work") {
+		t.Fatalf("recent window missing new work: %+v", subjects(g))
+	}
+	if hasSubject(g, "old work") {
+		t.Fatalf("recent window loaded old work: %+v", subjects(g))
+	}
+
+	older, err := loadGraphAt(dir, []string{"main"}, old.Add(-24*time.Hour), since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasSubject(older, "old work") {
+		t.Fatalf("older window missing old work: %+v", subjects(older))
+	}
+	if hasSubject(older, "new work") {
+		t.Fatalf("older window loaded new work: %+v", subjects(older))
+	}
+}
+
 func testRepo(t *testing.T) (string, func(...string)) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
@@ -426,4 +462,34 @@ func write(t *testing.T, dir, name, body string) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func commitAt(t *testing.T, dir string, at time.Time, msg string) {
+	t.Helper()
+	cmd := exec.Command("git", "commit", "-m", msg)
+	cmd.Dir = dir
+	stamp := at.Format(time.RFC3339)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Test",
+		"GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test",
+		"GIT_COMMITTER_EMAIL=test@example.com",
+		"GIT_AUTHOR_DATE="+stamp,
+		"GIT_COMMITTER_DATE="+stamp,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+}
+
+func subjects(g *RepoGraph) []string {
+	out := make([]string, 0, len(g.Commits))
+	for _, c := range g.Commits {
+		out = append(out, c.Subject)
+	}
+	return out
+}
+
+func hasSubject(g *RepoGraph, want string) bool {
+	return contains(subjects(g), want)
 }

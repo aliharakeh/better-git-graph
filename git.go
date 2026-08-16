@@ -73,6 +73,10 @@ func LoadGraph(path string) (*RepoGraph, error) {
 }
 
 func loadGraph(path string, only []string) (*RepoGraph, error) {
+	return loadGraphAt(path, only, time.Time{}, time.Time{})
+}
+
+func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph, error) {
 	root, err := gitRoot(path)
 	if err != nil {
 		return nil, err
@@ -90,16 +94,24 @@ func loadGraph(path string, only []string) (*RepoGraph, error) {
 		}
 		revs = values(branchTips)
 	}
-	commits, err := listCommits(root, revs)
+	windowed := !since.IsZero() || !until.IsZero()
+	var commits map[string]*rawCommit
+	if windowed {
+		commits, err = listCommitsRange(root, branchTips, since, until)
+	} else {
+		commits, err = listCommits(root, revs)
+	}
 	if err != nil {
 		return nil, err
 	}
 
 	order := sortBranchNames(keys(branchTips))
-	assignLanes(order, branchTips, commits)
-	if only == nil {
-		// ponytail: name deleted lanes from merge msg / remotes / name-rev; reflog if still unnamed
-		order = append(order, ensureMergeSourceLanes(root, branchTips, commits)...)
+	if !windowed {
+		assignLanes(order, branchTips, commits)
+		if only == nil {
+			// ponytail: name deleted lanes from merge msg / remotes / name-rev; reflog if still unnamed
+			order = append(order, ensureMergeSourceLanes(root, branchTips, commits)...)
+		}
 	}
 
 	nodes := make([]CommitNode, 0, len(commits))
@@ -314,6 +326,32 @@ func listCommits(root string, revs []string) (map[string]*rawCommit, error) {
 		args = append(args, revs...)
 	}
 	return parseLog(gitOutput(root, args...))
+}
+
+func listCommitsRange(root string, tips map[string]string, since, until time.Time) (map[string]*rawCommit, error) {
+	commits := map[string]*rawCommit{}
+	for _, name := range sortBranchNames(keys(tips)) {
+		args := []string{"log", "--first-parent", "--pretty=format:%H%x1f%P%x1f%an%x1f%aI%x1f%s", tips[name]}
+		if !since.IsZero() {
+			args = append(args, "--since="+since.Format(time.RFC3339))
+		}
+		if !until.IsZero() {
+			args = append(args, "--until="+until.Format(time.RFC3339))
+		}
+		chunk, err := parseLog(gitOutput(root, args...))
+		if err != nil {
+			return nil, err
+		}
+		for hash, c := range chunk {
+			if commits[hash] != nil {
+				continue
+			}
+			c.assigned = true
+			c.branch = laneName(name)
+			commits[hash] = c
+		}
+	}
+	return commits, nil
 }
 
 func parseLog(out string, err error) (map[string]*rawCommit, error) {

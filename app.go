@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -34,13 +35,33 @@ func (a *App) ListBranches(path string) ([]BranchInfo, error) {
 	return ListBranches(path)
 }
 
-func (a *App) LoadRepo(path string, branches []string) (*RepoGraph, error) {
+func (a *App) LoadRepo(path string, branches []string, since string, until string) (*RepoGraph, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, fmt.Errorf("enter a repository path")
 	}
-	if branches == nil {
+	from, err := parseISO(since)
+	if err != nil {
+		return nil, fmt.Errorf("invalid since: %w", err)
+	}
+	to, err := parseISO(until)
+	if err != nil {
+		return nil, fmt.Errorf("invalid until: %w", err)
+	}
+	if branches == nil && from.IsZero() && to.IsZero() {
 		return LoadGraph(path)
 	}
-	return loadGraph(path, branches)
+	return loadGraphAt(path, branches, from, to)
+}
+
+func parseISO(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339Nano, s)
+	}
+	return t, err
 }

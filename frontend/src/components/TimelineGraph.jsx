@@ -10,23 +10,14 @@ const hourMs = 3600000
 
 const minSpan = 7 * dayMs
 
-function viewWindow(commits) {
+function viewWindow(commits, rangeStart, rangeEnd) {
+  if (rangeStart != null && rangeEnd != null && rangeEnd > rangeStart) {
+    return [rangeStart, rangeEnd]
+  }
   const times = commits.map((c) => +new Date(c.timestamp))
-  if (!times.length) {
-    const now = Date.now()
-    return [now - minSpan, now]
-  }
-  const dataMin = Math.min(...times)
-  const dataMax = Math.max(...times)
-  const now = new Date()
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
-  let to = Math.min(dataMax, now.getTime())
-  let from = Math.max(dataMin, monthStart)
-  if (!(from < to)) {
-    to = dataMax
-    from = dataMin
-  }
-  if (to - from < minSpan) from = Math.max(dataMin, to - minSpan)
+  const to = Math.min(times.length ? Math.max(...times) : Date.now(), Date.now())
+  const d = new Date(to)
+  const from = +new Date(d.getFullYear(), d.getMonth() - 5, d.getDate())
   return [from, to === from ? to + 1 : to]
 }
 
@@ -78,12 +69,14 @@ function clusterByDay(commits) {
   return map
 }
 
-export function TimelineGraph({ graph, focused, onSelect, selectedHash }) {
+export function TimelineGraph({ graph, focused, onSelect, selectedHash, rangeStart, rangeEnd, onViewChange }) {
   const wrapRef = useRef(null)
   const svgRef = useRef(null)
   const axisRef = useRef(null)
   const zoomRef = useRef(d3.zoomIdentity)
   const zoomKeyRef = useRef("")
+  const viewCb = useRef(onViewChange)
+  viewCb.current = onViewChange
   const [size, setSize] = useState({ w: 900, h: 480 })
   const [tip, setTip] = useState(null)
 
@@ -92,7 +85,8 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash }) {
     if (!el) return
     const ro = new ResizeObserver(([entry]) => {
       const { width, height } = entry.contentRect
-      setSize({ w: Math.max(width, 1), h: Math.max(height, 1) })
+      if (width < 80 || height < 80) return
+      setSize((prev) => (Math.abs(prev.w - width) < 1 && Math.abs(prev.h - height) < 1 ? prev : { w: width, h: height }))
     })
     ro.observe(el)
     return () => ro.disconnect()
@@ -101,7 +95,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash }) {
   const related = useMemo(() => {
     if (!focused || !graph) return null
     const set = new Set([focused])
-    for (const m of graph.merges) {
+    for (const m of graph.merges || []) {
       const src = laneName(m.sourceBranch)
       const dst = laneName(m.targetBranch)
       if (src === focused) set.add(dst)
@@ -115,15 +109,15 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash }) {
     const axisEl = axisRef.current
     const svg = d3.select(svgEl)
     const axisSvg = d3.select(axisEl)
+    if (!graph?.branches?.length) return
     svg.selectAll("*").remove()
     axisSvg.selectAll("*").remove()
-    if (!graph?.branches?.length) return
 
     const branches = [...new Set(graph.branches.map(laneName))]
     const commits = graph.commits.map((c) => ({ ...c, branch: laneName(c.branch) })).filter((c) => branches.includes(c.branch))
     const clusterMap = clusterByDay(commits)
     const clusters = [...clusterMap.values()]
-    const [rangeStart, rangeEnd] = viewWindow(commits)
+    const [winStart, winEnd] = viewWindow(commits, rangeStart, rangeEnd)
     const yOf = (name) => MARGIN.top + branches.indexOf(name) * LANE_H + LANE_H / 2
     const color = d3.scaleOrdinal(COLORS).domain(branches)
     const width = size.w
@@ -133,7 +127,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash }) {
     const minY = Math.min(0, clipH - plotBottom)
     const yOff = (t) => Math.max(minY, Math.min(0, t.y))
 
-    const resetKey = `${rangeStart}:${rangeEnd}:${graph.path}:${branches.join("\n")}`
+    const resetKey = `${winStart}:${winEnd}:${graph.path}:${branches.join("\n")}`
     if (zoomKeyRef.current !== resetKey) {
       zoomRef.current = d3.zoomIdentity
       zoomKeyRef.current = resetKey
@@ -142,19 +136,18 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash }) {
     svg.attr("width", width).attr("height", clipH).attr("viewBox", `0 0 ${width} ${clipH}`).style("cursor", "grab")
     axisSvg.attr("width", width).attr("height", MARGIN.bottom).attr("viewBox", `0 0 ${width} ${MARGIN.bottom}`)
 
-    const x0 = d3.scaleTime().domain([new Date(rangeStart), new Date(rangeEnd)]).range([MARGIN.left, MARGIN.left + innerW])
+    const x0 = d3.scaleTime().domain([new Date(winStart), new Date(winEnd)]).range([MARGIN.left, MARGIN.left + innerW])
     const dim = (branch) => (related && !related.has(branch) ? 0.12 : 1)
     const tickFmt = (xz) => {
       const span = +xz.domain()[1] - +xz.domain()[0]
-      if (span > 180 * dayMs) return d3.timeFormat("%b %Y")
+      if (span > 40 * dayMs) return d3.timeFormat("%b %Y")
       if (span > 2 * dayMs) return d3.timeFormat("%a %b %d")
       if (span > 6 * hourMs) return d3.timeFormat("%b %d %H:%M")
       return d3.timeFormat("%H:%M")
     }
     const tickInterval = (xz) => {
       const span = +xz.domain()[1] - +xz.domain()[0]
-      if (span > 180 * dayMs) return null
-      if (span > 45 * dayMs) return d3.timeWeek.every(1)
+      if (span > 40 * dayMs) return d3.timeMonth.every(1)
       if (span > 2 * dayMs) return d3.timeDay.every(1)
       if (span > 6 * hourMs) return d3.timeHour.every(1)
       return d3.timeMinute.every(15)
@@ -375,11 +368,10 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash }) {
         .call((g) => g.selectAll(".tick text").attr("fill", "#94a3b8").attr("font-size", 11))
     }
 
-    const viewSpan = Math.max(rangeEnd - rangeStart, 1)
-    const dataTimes = commits.map((c) => +new Date(c.timestamp))
-    const fullSpan = dataTimes.length ? Math.max(...dataTimes) - Math.min(...dataTimes) : viewSpan
-    const minK = Math.max(0.02, viewSpan / Math.max(fullSpan, viewSpan))
+    const viewSpan = Math.max(winEnd - winStart, 1)
+    const minK = 1
     const maxK = Math.max(1, viewSpan / minSpan)
+    const clamp = (t) => d3.zoomIdentity.translate(t.x, yOff(t)).scale(Math.max(minK, t.k))
 
     const zoom = d3.zoom()
       .scaleExtent([minK, maxK])
@@ -388,12 +380,16 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash }) {
       .on("start", () => svg.style("cursor", "grabbing"))
       .on("end", () => svg.style("cursor", "grab"))
       .on("zoom", (event) => {
-        const t = event.transform
-        const y = yOff(t)
-        const next = y === t.y ? t : d3.zoomIdentity.translate(t.x, y).scale(t.k)
-        if (next !== t) svg.node().__zoom = next
+        const next = clamp(event.transform)
+        if (next.x !== event.transform.x || next.y !== event.transform.y || next.k !== event.transform.k) {
+          svg.node().__zoom = next
+        }
         zoomRef.current = next
         apply(next)
+        if (event.sourceEvent) {
+          const [a, b] = next.rescaleX(x0).domain()
+          viewCb.current?.(+a, +b)
+        }
       })
 
     svg.call(zoom)
@@ -407,7 +403,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash }) {
     return () => {
       d3.select(svgEl).on(".zoom", null).on("dblclick", null)
     }
-  }, [graph, related, size, selectedHash, onSelect])
+  }, [graph, related, size, selectedHash, onSelect, rangeStart, rangeEnd])
 
   return (
     <div ref={wrapRef} className="relative h-full w-full overflow-hidden">
@@ -416,7 +412,11 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash }) {
       {tip && (
         <div
           className="pointer-events-none absolute z-20 w-72 rounded-md border border-border bg-card px-3 py-2 text-xs shadow-lg"
-          style={{ left: tip.x, top: tip.y }}
+          style={{
+            left: tip.x,
+            top: tip.y,
+            transform: `translate(max(${8 - tip.x}px, min(0px, calc(${size.w - 8}px - 100% - ${tip.x}px))), max(${8 - tip.y}px, min(0px, calc(${size.h - 8}px - 100% - ${tip.y}px))))`,
+          }}
         >
           <TipBody d={tip.d} />
         </div>
