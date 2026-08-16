@@ -1,5 +1,19 @@
 export namespace main {
 	
+	export class BranchInfo {
+	    name: string;
+	    updated?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BranchInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.updated = source["updated"];
+	    }
+	}
 	export class CommitNode {
 	    hash: string;
 	    branch: string;

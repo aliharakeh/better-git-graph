@@ -1,6 +1,6 @@
 import { FolderOpen, GitBranch, GitMerge, Loader2, Search, X } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
-import { LoadRepo, SelectRepo } from "../wailsjs/go/main/App";
+import { ListBranches, LoadRepo, SelectRepo } from "../wailsjs/go/main/App";
 import { TimelineGraph } from "./components/TimelineGraph";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -50,6 +50,16 @@ function wailsError(err) {
   return err.message || String(err)
 }
 
+function lanesByUpdated(list) {
+  const latest = new Map()
+  for (const b of list || []) {
+    const name = laneName(b.name)
+    const t = b.updated ? +new Date(b.updated) : 0
+    if (!latest.has(name) || t > latest.get(name)) latest.set(name, t)
+  }
+  return [...latest.keys()].sort((a, b) => latest.get(b) - latest.get(a))
+}
+
 export default function App() {
   const [path, setPath] = useState("")
   const [graph, setGraph] = useState(null)
@@ -63,47 +73,78 @@ export default function App() {
   const lastSelected = useRef(null)
   if (selected) lastSelected.current = selected
   const inspect = selected || lastSelected.current
+  const [catalog, setCatalog] = useState([])
   const [branchLimit, setBranchLimit] = useState(5)
   const [branchSort, setBranchSort] = useState("updated")
   const [visible, setVisible] = useState(() => new Set())
   const [authors, setAuthors] = useState(() => new Set())
   const [kinds, setKinds] = useState(() => new Set(["pr", "merge", "normal"]))
+  const visibleRef = useRef(visible)
+  visibleRef.current = visible
+  const loadSeq = useRef(0)
+  const reloadTimer = useRef(0)
 
-  async function load(nextPath) {
+  async function load(nextPath, { reset = true, branches } = {}) {
     const target = (nextPath ?? path).trim()
     if (!target) {
       setError("Enter a repository path")
       return
     }
+    const gen = ++loadSeq.current
     setLoading(true)
     setError("")
-    setSelected(null)
-    setFocused("")
+    if (reset) {
+      setSelected(null)
+      setFocused("")
+    }
     try {
-      const data = await LoadRepo(target)
+      let selected = branches
+      if (reset) {
+        const list = await ListBranches(target)
+        if (gen !== loadSeq.current) return
+        setCatalog(list)
+        const names = lanesByUpdated(list)
+        const n = Math.min(5, names.length)
+        selected = names.slice(0, n)
+        setBranchLimit(n || 1)
+        setVisible(new Set(selected))
+        setMsgQuery("")
+        setAuthorQuery("")
+        setKinds(new Set(["pr", "merge", "normal"]))
+      } else if (!selected) {
+        selected = [...visibleRef.current]
+      }
+      const data = await LoadRepo(target, selected)
+      if (gen !== loadSeq.current) return
       setGraph(data)
       setPath(data.path || target)
-      const names = [...new Set((data.branches || []).map(laneName))]
-      const latest = {}
-      for (const c of data.commits || []) {
-        const t = +new Date(c.timestamp)
-        const b = laneName(c.branch)
-        if (latest[b] == null || t > latest[b]) latest[b] = t
+      if (reset) {
+        setAuthors(new Set((data.commits || []).map(authorName)))
+      } else {
+        setAuthors((prev) => {
+          const next = new Set(prev)
+          for (const c of data.commits || []) next.add(authorName(c))
+          return next
+        })
       }
-      names.sort((a, b) => (latest[b] || 0) - (latest[a] || 0))
-      const n = Math.min(5, names.length)
-      setBranchLimit(n || 1)
-      setVisible(new Set(names.slice(0, n)))
-      setMsgQuery("")
-      setAuthorQuery("")
-      setKinds(new Set(["pr", "merge", "normal"]))
-      setAuthors(new Set((data.commits || []).map(authorName)))
     } catch (err) {
-      setGraph(null)
+      if (gen !== loadSeq.current) return
+      if (reset) {
+        setGraph(null)
+        setCatalog([])
+      }
       setError(wailsError(err))
     } finally {
-      setLoading(false)
+      if (gen === loadSeq.current) setLoading(false)
     }
+  }
+
+  function applyVisible(next, { debounce = false } = {}) {
+    setVisible(next)
+    window.clearTimeout(reloadTimer.current)
+    const run = () => load(path, { reset: false, branches: [...next] })
+    if (debounce) reloadTimer.current = window.setTimeout(run, 150)
+    else run()
   }
 
   async function browse() {
@@ -118,17 +159,10 @@ export default function App() {
   }
 
   const rankedBranches = useMemo(() => {
-    if (!graph) return []
-    const names = [...new Set((graph.branches || []).map(laneName))]
+    const names = lanesByUpdated(catalog)
     if (branchSort === "alpha") return names.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
-    const latest = {}
-    for (const c of graph.commits || []) {
-      const t = +new Date(c.timestamp)
-      const b = laneName(c.branch)
-      if (latest[b] == null || t > latest[b]) latest[b] = t
-    }
-    return names.sort((a, b) => (latest[b] || 0) - (latest[a] || 0))
-  }, [graph, branchSort])
+    return names
+  }, [catalog, branchSort])
 
   const branches = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -175,7 +209,14 @@ export default function App() {
   function showTop(n) {
     const count = Math.min(Math.max(n, 0), rankedBranches.length)
     setBranchLimit(count)
-    setVisible(new Set(rankedBranches.slice(0, count)))
+    applyVisible(new Set(rankedBranches.slice(0, count)), { debounce: true })
+  }
+
+  function toggleVisible(name) {
+    const next = new Set(visible)
+    if (next.has(name)) next.delete(name)
+    else next.add(name)
+    applyVisible(next)
   }
 
   function toggleIn(setter, value) {
@@ -217,20 +258,20 @@ export default function App() {
             {error && <p className="text-xs text-destructive">{error}</p>}
           </div>
 
-          {graph?.branches?.length > 0 && (
+          {rankedBranches.length > 0 && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-medium text-muted-foreground">Visible branches</label>
                 <span className="font-mono text-[11px] text-muted-foreground">
-                  {visible.size} / {graph.branches.length}
+                  {visible.size} / {rankedBranches.length}
                 </span>
               </div>
               <div className="flex items-center gap-2">
                 <input
                   type="range"
                   min={0}
-                  max={graph.branches.length}
-                  value={Math.min(branchLimit, graph.branches.length)}
+                  max={rankedBranches.length}
+                  value={Math.min(branchLimit, rankedBranches.length)}
                   onChange={(e) => showTop(Number(e.target.value))}
                   className="h-2 w-full accent-primary"
                   title="Show top N by current sort"
@@ -238,8 +279,8 @@ export default function App() {
                 <Input
                   type="number"
                   min={0}
-                  max={graph.branches.length}
-                  value={Math.min(branchLimit, graph.branches.length)}
+                  max={rankedBranches.length}
+                  value={Math.min(branchLimit, rankedBranches.length)}
                   onChange={(e) => showTop(Number(e.target.value) || 0)}
                   className="h-8 w-16 px-2 text-center"
                 />
@@ -288,7 +329,7 @@ export default function App() {
                   <input
                     type="checkbox"
                     checked={visible.has(name)}
-                    onChange={() => toggleIn(setVisible, name)}
+                    onChange={() => toggleVisible(name)}
                     className="size-3.5 shrink-0 accent-primary"
                     title={visible.has(name) ? "Hide branch" : "Show branch"}
                   />
@@ -380,7 +421,7 @@ export default function App() {
                   ))}
                 </div>
                 <div className="flex gap-2 tabular-nums">
-                  <Badge variant="outline" className="w-[7.5rem] justify-center">{visibleGraph.branches.length}/{graph.branches.length} branches</Badge>
+                  <Badge variant="outline" className="w-[7.5rem] justify-center">{visibleGraph.branches.length}/{rankedBranches.length} branches</Badge>
                   <Badge variant="outline" className="w-[6.25rem] justify-center">{visibleGraph.merges.length} merges</Badge>
                   <Badge variant="outline" className="w-[6.75rem] justify-center">{visibleGraph.commits.length} commits</Badge>
                 </div>

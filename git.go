@@ -39,6 +39,17 @@ type RepoGraph struct {
 	Merges   []MergeEvent `json:"merges"`
 }
 
+type BranchInfo struct {
+	Name    string `json:"name"`
+	Updated string `json:"updated,omitempty"`
+}
+
+type branchMeta struct {
+	name string
+	hash string
+	at   time.Time
+}
+
 type rawCommit struct {
 	hash     string
 	parents  []string
@@ -58,37 +69,38 @@ var (
 )
 
 func LoadGraph(path string) (*RepoGraph, error) {
-	abs, err := filepath.Abs(path)
+	return loadGraph(path, nil)
+}
+
+func loadGraph(path string, only []string) (*RepoGraph, error) {
+	root, err := gitRoot(path)
 	if err != nil {
 		return nil, err
 	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		return nil, fmt.Errorf("path not found: %w", err)
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("not a directory: %s", abs)
-	}
-
-	root, err := gitOutput(abs, "rev-parse", "--show-toplevel")
-	if err != nil {
-		return nil, fmt.Errorf("not a git repository: %s", abs)
-	}
-	root = filepath.Clean(root)
 
 	branchTips, err := listBranchTips(root)
 	if err != nil {
 		return nil, err
 	}
-	commits, err := listCommits(root)
+	var revs []string
+	if only != nil {
+		branchTips = filterTips(branchTips, only)
+		if len(branchTips) == 0 {
+			return &RepoGraph{Path: root}, nil
+		}
+		revs = values(branchTips)
+	}
+	commits, err := listCommits(root, revs)
 	if err != nil {
 		return nil, err
 	}
 
 	order := sortBranchNames(keys(branchTips))
 	assignLanes(order, branchTips, commits)
-	// ponytail: name deleted lanes from merge msg / remotes / name-rev; reflog if still unnamed
-	order = append(order, ensureMergeSourceLanes(root, branchTips, commits)...)
+	if only == nil {
+		// ponytail: name deleted lanes from merge msg / remotes / name-rev; reflog if still unnamed
+		order = append(order, ensureMergeSourceLanes(root, branchTips, commits)...)
+	}
 
 	nodes := make([]CommitNode, 0, len(commits))
 	merges := make([]MergeEvent, 0)
@@ -171,47 +183,140 @@ func LoadGraph(path string) (*RepoGraph, error) {
 	return &RepoGraph{Path: root, Branches: branches, Commits: nodes, Merges: merges}, nil
 }
 
+func ListBranches(path string) ([]BranchInfo, error) {
+	root, err := gitRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	metas, err := listBranchMeta(root)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]BranchInfo, 0, len(metas))
+	for _, m := range metas {
+		info := BranchInfo{Name: m.name}
+		if !m.at.IsZero() {
+			info.Updated = m.at.Format(time.RFC3339)
+		}
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func gitRoot(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("path not found: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("not a directory: %s", abs)
+	}
+	root, err := gitOutput(abs, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", fmt.Errorf("not a git repository: %s", abs)
+	}
+	return filepath.Clean(root), nil
+}
+
 func listBranchTips(root string) (map[string]string, error) {
-	out, err := gitOutput(root, "for-each-ref", "--format=%(refname:short)%00%(objectname)", "refs/heads")
+	metas, err := listBranchMeta(root)
 	if err != nil {
 		return nil, err
 	}
-	tips := parseRefTips(out)
-	out, err = gitOutput(root, "for-each-ref", "--format=%(refname:short)%00%(objectname)", "refs/remotes")
+	tips := make(map[string]string, len(metas))
+	for _, m := range metas {
+		tips[m.name] = m.hash
+	}
+	return tips, nil
+}
+
+func listBranchMeta(root string) ([]branchMeta, error) {
+	const format = "--format=%(refname:short)%00%(objectname)%00%(committerdate:iso-strict)"
+	out, err := gitOutput(root, "for-each-ref", format, "refs/heads")
 	if err != nil {
 		return nil, err
 	}
-	for name, hash := range parseRefTips(out) {
+	tips := parseRefMeta(out)
+	out, err = gitOutput(root, "for-each-ref", format, "refs/remotes")
+	if err != nil {
+		return nil, err
+	}
+	for name, meta := range parseRefMeta(out) {
 		if strings.HasSuffix(name, "/HEAD") {
 			continue
 		}
 		short := stripRemotePrefix(name)
 		if existing, ok := tips[short]; !ok {
-			tips[short] = hash
-		} else if existing != hash {
-			tips[name] = hash
+			meta.name = short
+			tips[short] = meta
+		} else if existing.hash != meta.hash {
+			tips[name] = meta
 		}
 	}
-	return tips, nil
+	outMetas := make([]branchMeta, 0, len(tips))
+	for _, m := range tips {
+		outMetas = append(outMetas, m)
+	}
+	return outMetas, nil
 }
 
-func parseRefTips(out string) map[string]string {
-	tips := map[string]string{}
+func parseRefMeta(out string) map[string]branchMeta {
+	tips := map[string]branchMeta{}
 	if out == "" {
 		return tips
 	}
 	for _, line := range strings.Split(out, "\n") {
-		name, hash, ok := strings.Cut(line, "\x00")
-		if !ok || name == "" || hash == "" {
+		parts := strings.Split(line, "\x00")
+		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
 			continue
 		}
-		tips[name] = hash
+		meta := branchMeta{name: parts[0], hash: parts[1]}
+		if len(parts) > 2 && parts[2] != "" {
+			if at, err := time.Parse(time.RFC3339, parts[2]); err == nil {
+				meta.at = at
+			} else if at, err := time.Parse(time.RFC3339Nano, parts[2]); err == nil {
+				meta.at = at
+			}
+		}
+		tips[parts[0]] = meta
 	}
 	return tips
 }
 
-func listCommits(root string) (map[string]*rawCommit, error) {
-	out, err := gitOutput(root, "log", "--all", "--pretty=format:%H%x1f%P%x1f%an%x1f%aI%x1f%s")
+func filterTips(tips map[string]string, want []string) map[string]string {
+	allow := map[string]bool{}
+	for _, w := range want {
+		if w == "" {
+			continue
+		}
+		allow[w] = true
+		allow[laneName(w)] = true
+	}
+	out := map[string]string{}
+	for name, hash := range tips {
+		if allow[name] || allow[laneName(name)] {
+			out[name] = hash
+		}
+	}
+	return out
+}
+
+func listCommits(root string, revs []string) (map[string]*rawCommit, error) {
+	args := []string{"log", "--pretty=format:%H%x1f%P%x1f%an%x1f%aI%x1f%s"}
+	if len(revs) == 0 {
+		args = append(args, "--all")
+	} else {
+		args = append(args, revs...)
+	}
+	return parseLog(gitOutput(root, args...))
+}
+
+func parseLog(out string, err error) (map[string]*rawCommit, error) {
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "does not have any commits") {
 			return map[string]*rawCommit{}, nil
@@ -451,6 +556,14 @@ func keys(m map[string]string) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
+	}
+	return out
+}
+
+func values(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
 	}
 	return out
 }

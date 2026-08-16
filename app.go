@@ -26,10 +26,21 @@ func (a *App) SelectRepo() (string, error) {
 	})
 }
 
-func (a *App) LoadRepo(path string) (*RepoGraph, error) {
+func (a *App) ListBranches(path string) ([]BranchInfo, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, fmt.Errorf("enter a repository path")
 	}
-	return LoadGraph(path)
+	return ListBranches(path)
+}
+
+func (a *App) LoadRepo(path string, branches []string) (*RepoGraph, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("enter a repository path")
+	}
+	if branches == nil {
+		return LoadGraph(path)
+	}
+	return loadGraph(path, branches)
 }

@@ -279,6 +279,102 @@ func TestLoadGraphCustomMergeKeepsSourceLane(t *testing.T) {
 	}
 }
 
+func TestLoadGraphSelectedBranches(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "README.md", "a\n")
+	git("add", "README.md")
+	git("commit", "-m", "init")
+	git("checkout", "-b", "feature/secret")
+	write(t, dir, "secret.txt", "nope\n")
+	git("add", "secret.txt")
+	git("commit", "-m", "secret work")
+	git("checkout", "main")
+
+	g, err := loadGraph(dir, []string{"main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range g.Commits {
+		if c.Subject == "secret work" {
+			t.Fatalf("selected main still loaded feature commit: %+v", c)
+		}
+	}
+	if contains(g.Branches, "feature/secret") {
+		t.Fatalf("branches = %v, feature/secret should stay unloaded", g.Branches)
+	}
+
+	all, err := LoadGraph(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(all.Branches, "feature/secret") {
+		t.Fatalf("full load branches = %v, want feature/secret", all.Branches)
+	}
+
+	none, err := loadGraph(dir, []string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none.Commits) != 0 || len(none.Branches) != 0 {
+		t.Fatalf("empty selection still loaded %+v", none)
+	}
+}
+
+func TestLoadGraphHidesMergedBranch(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "README.md", "a\n")
+	git("add", "README.md")
+	git("commit", "-m", "init")
+	git("checkout", "-b", "feature/login")
+	write(t, dir, "login.txt", "ok\n")
+	git("add", "login.txt")
+	git("commit", "-m", "add login")
+	git("checkout", "main")
+	git("merge", "--no-ff", "-m", "Merge branch 'feature/login'", "feature/login")
+
+	g, err := loadGraph(dir, []string{"main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contains(g.Branches, "feature/login") {
+		t.Fatalf("branches = %v, hidden feature/login should stay unloaded", g.Branches)
+	}
+	for _, c := range g.Commits {
+		if c.Subject == "add login" {
+			t.Fatalf("hidden branch commit still loaded: %+v", c)
+		}
+	}
+	if len(g.Merges) != 1 || g.Merges[0].TargetBranch != "main" {
+		t.Fatalf("merges = %+v", g.Merges)
+	}
+}
+
+func TestListBranches(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "README.md", "a\n")
+	git("add", "README.md")
+	git("commit", "-m", "init")
+	git("checkout", "-b", "feature/login")
+	write(t, dir, "login.txt", "ok\n")
+	git("add", "login.txt")
+	git("commit", "-m", "add login")
+
+	got, err := ListBranches(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(got))
+	for _, b := range got {
+		names = append(names, b.Name)
+		if b.Updated == "" {
+			t.Fatalf("%s missing updated", b.Name)
+		}
+	}
+	if !contains(names, "main") || !contains(names, "feature/login") {
+		t.Fatalf("branches = %v", names)
+	}
+}
+
 func testRepo(t *testing.T) (string, func(...string)) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
