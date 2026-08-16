@@ -21,6 +21,7 @@ export namespace main {
 	    author: string;
 	    subject: string;
 	    isMerge: boolean;
+	    tags?: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new CommitNode(source);
@@ -34,6 +35,7 @@ export namespace main {
 	        this.author = source["author"];
 	        this.subject = source["subject"];
 	        this.isMerge = source["isMerge"];
+	        this.tags = source["tags"];
 	    }
 	}
 	export class MergeEvent {

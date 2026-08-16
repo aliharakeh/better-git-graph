@@ -50,12 +50,15 @@ function clusterByDay(commits) {
     const key = clusterKey(c.branch, c.timestamp)
     let g = map.get(key)
     if (!g) {
-      g = { ...c, count: 0, commits: [], merges: [] }
+      g = { ...c, count: 0, commits: [], merges: [], tags: [] }
       map.set(key, g)
     }
     g.commits.push(c)
     g.count++
     g.isMerge = g.isMerge || c.isMerge
+    for (const t of c.tags || []) {
+      if (!g.tags.includes(t)) g.tags.push(t)
+    }
     if (+new Date(c.timestamp) >= +new Date(g.timestamp)) {
       g.hash = c.hash
       g.timestamp = c.timestamp
@@ -282,7 +285,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, rangeSta
       .on("click", (event, d) => {
         event.stopPropagation()
         if (d.count === 1 && d.merges?.length === 1) {
-          onSelect({ kind: "merge", ...d.merges[0] })
+          onSelect({ kind: "merge", ...d.merges[0], tags: d.tags })
           return
         }
         onSelect({ kind: d.count > 1 ? "cluster" : "commit", ...d })
@@ -309,6 +312,20 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, rangeSta
       .attr("font-weight", 700)
       .attr("pointer-events", "none")
       .text((d) => (d.count > 99 ? "99+" : d.count))
+    commitDots.filter((d) => d.tags?.length).append("text")
+      .attr("y", (d) => innerR(d) + (d.isMerge ? 16 : 14))
+      .attr("text-anchor", "middle")
+      .attr("fill", "#fbbf24")
+      .attr("stroke", "#0b1220")
+      .attr("stroke-width", 3)
+      .attr("paint-order", "stroke")
+      .attr("font-size", 10)
+      .attr("font-weight", 700)
+      .attr("pointer-events", "none")
+      .text((d) => {
+        const s = d.tags.join(" · ")
+        return s.length > 28 ? `${s.slice(0, 26)}…` : s
+      })
 
     const srcNodes = plot.append("g").selectAll("circle")
       .data(merges.filter((m) => m.sourceBranch !== m.targetBranch && !clusterMap.get(clusterKey(m.sourceBranch, m.timestamp))))
@@ -454,7 +471,10 @@ function TipBody({ d }) {
       {items.slice(0, 8).map((c, i) => (
         <div key={c.hash || i} className="flex items-start gap-2">
           <TimeChip ts={c.timestamp} withDate={items.length === 1} />
-          <span className="min-w-0 break-words text-foreground">{c.subject || c.hash}</span>
+          <span className="min-w-0 break-words text-foreground">
+            {c.subject || c.hash}
+            {c.tags?.length ? <span className="ml-1 font-semibold text-amber-400">{c.tags.join(" · ")}</span> : null}
+          </span>
         </div>
       ))}
       {extra > 0 && <div className="text-[11px] text-muted-foreground">+{extra} more</div>}

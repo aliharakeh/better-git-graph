@@ -641,6 +641,7 @@ export default function App() {
                 <dl className="space-y-2 text-xs">
                   <Row label="Merge commit" value={inspect.hash} mono />
                   <Row label="Message" value={inspect.subject || "—"} />
+                  {inspect.tags?.length ? <Row label="Tags" value={inspect.tags.join(" · ")} /> : null}
                   <Row label="Source branch" value={inspect.sourceBranch} />
                   <Row label="Target branch" value={inspect.targetBranch} />
                   <Row label="Timestamp" value={<TimeChip ts={inspect.timestamp} withDate />} />
@@ -662,6 +663,7 @@ export default function App() {
                         <dd className="min-w-0 break-words font-medium">
                           {c.subject || c.hash}
                           {c.isMerge ? <span className="ml-1 text-muted-foreground">merge</span> : null}
+                          {c.tags?.length ? <span className="ml-1 text-amber-400">{c.tags.join(" · ")}</span> : null}
                         </dd>
                       </div>
                     ))}
@@ -672,6 +674,7 @@ export default function App() {
                   <Row label="Commit" value={inspect.hash} mono />
                   <Row label="Message" value={inspect.subject || "—"} />
                   <Row label="Branch" value={inspect.branch} />
+                  {inspect.tags?.length ? <Row label="Tags" value={inspect.tags.join(" · ")} /> : null}
                   <Row label="Timestamp" value={<TimeChip ts={inspect.timestamp} withDate />} />
                   <Row label="Author" value={inspect.author} />
                 </dl>

@@ -18,7 +18,8 @@ type CommitNode struct {
 	Timestamp string `json:"timestamp"`
 	Author    string `json:"author"`
 	Subject   string `json:"subject"`
-	IsMerge   bool   `json:"isMerge"`
+	IsMerge   bool     `json:"isMerge"`
+	Tags      []string `json:"tags,omitempty"`
 }
 
 type MergeEvent struct {
@@ -104,6 +105,10 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 	if err != nil {
 		return nil, err
 	}
+	tagByHash, err := listTags(root)
+	if err != nil {
+		return nil, err
+	}
 
 	order := sortBranchNames(keys(branchTips))
 	if !windowed {
@@ -140,6 +145,7 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 			Author:    c.author,
 			Subject:   c.subject,
 			IsMerge:   len(c.parents) > 1,
+			Tags:      tagByHash[c.hash],
 		})
 		if len(c.parents) < 2 {
 			continue
@@ -275,6 +281,35 @@ func listBranchMeta(root string) ([]branchMeta, error) {
 		outMetas = append(outMetas, m)
 	}
 	return outMetas, nil
+}
+
+func listTags(root string) (map[string][]string, error) {
+	out, err := gitOutput(root, "for-each-ref", "--format=%(refname:short)%00%(*objectname)%00%(objectname)", "refs/tags")
+	if err != nil {
+		return nil, err
+	}
+	byHash := map[string][]string{}
+	if out == "" {
+		return byHash, nil
+	}
+	for _, line := range strings.Split(out, "\n") {
+		parts := strings.Split(line, "\x00")
+		if len(parts) < 3 || parts[0] == "" {
+			continue
+		}
+		hash := parts[1]
+		if hash == "" {
+			hash = parts[2]
+		}
+		if hash == "" {
+			continue
+		}
+		byHash[hash] = append(byHash[hash], parts[0])
+	}
+	for _, tags := range byHash {
+		sort.Strings(tags)
+	}
+	return byHash, nil
 }
 
 func parseRefMeta(out string) map[string]branchMeta {

@@ -375,6 +375,36 @@ func TestListBranches(t *testing.T) {
 	}
 }
 
+func TestLoadGraphTags(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "README.md", "a\n")
+	git("add", "README.md")
+	git("commit", "-m", "init")
+	git("tag", "v1.0")
+	git("tag", "-a", "release", "-m", "annotated")
+	write(t, dir, "x.txt", "b\n")
+	git("add", "x.txt")
+	git("commit", "-m", "second")
+	git("tag", "v2.0")
+
+	g, err := LoadGraph(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]string{}
+	for _, c := range g.Commits {
+		if len(c.Tags) > 0 {
+			got[c.Subject] = c.Tags
+		}
+	}
+	if strings.Join(got["init"], ",") != "release,v1.0" {
+		t.Fatalf("init tags = %v, want [release v1.0]", got["init"])
+	}
+	if strings.Join(got["second"], ",") != "v2.0" {
+		t.Fatalf("second tags = %v, want [v2.0]", got["second"])
+	}
+}
+
 func TestLoadGraphTimeRange(t *testing.T) {
 	dir, git := testRepo(t)
 	old := time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC)
