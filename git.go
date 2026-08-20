@@ -86,13 +86,14 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 		return nil, err
 	}
 
-	branchTips, err := listBranchTips(root)
+	allTips, err := listBranchTips(root)
 	if err != nil {
 		return nil, err
 	}
+	branchTips := allTips
 	var revs []string
 	if only != nil {
-		branchTips = filterTips(branchTips, only)
+		branchTips = filterTips(allTips, only)
 		if len(branchTips) == 0 {
 			return &RepoGraph{Path: root, CommitURL: commitURLPrefix(toWebBase(remoteURL(root)))}, nil
 		}
@@ -121,6 +122,10 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 			// ponytail: name deleted lanes from merge msg / remotes / name-rev; reflog if still unnamed
 			order = append(order, ensureMergeSourceLanes(root, branchTips, commits)...)
 		}
+	}
+	// when filtering, reassign to original branch via first-parent hashes so hidden source commits don't collapse onto visible descendant
+	if only != nil && len(allTips) > len(branchTips) {
+		_ = reassignToOriginalViaFirstParent(root, commits, allTips)
 	}
 
 	nodes := make([]CommitNode, 0, len(commits))
@@ -758,13 +763,19 @@ func sortBranchNames(names []string) []string {
 }
 
 func claimOrder(names []string) []string {
-	rank := map[string]int{"main": 1, "master": 1, "trunk": 1, "develop": 1, "dev": 1}
+	rank := map[string]int{"main": 0, "master": 1, "trunk": 2, "develop": 3, "dev": 4}
 	out := append([]string{}, names...)
 	sort.Slice(out, func(i, j int) bool {
-		iTrunk := rank[laneName(out[i])]
-		jTrunk := rank[laneName(out[j])]
-		if iTrunk != jTrunk {
-			return iTrunk < jTrunk
+		ri, okI := rank[laneName(out[i])]
+		rj, okJ := rank[laneName(out[j])]
+		if !okI {
+			ri = 100
+		}
+		if !okJ {
+			rj = 100
+		}
+		if ri != rj {
+			return ri < rj
 		}
 		return out[i] < out[j]
 	})
@@ -901,6 +912,51 @@ func shortHash(h string) string {
 		return h[:7]
 	}
 	return h
+}
+
+func reassignToOriginalViaFirstParent(root string, commits map[string]*rawCommit, allTips map[string]string) error {
+	if len(commits) == 0 || len(allTips) == 0 {
+		return nil
+	}
+	orderAll := claimOrder(sortBranchNames(keys(allTips)))
+	sets := make(map[string]map[string]bool, len(allTips))
+	for _, name := range orderAll {
+		tip := allTips[name]
+		if tip == "" {
+			continue
+		}
+		out, err := gitOutput(root, "rev-list", "--first-parent", tip)
+		if err != nil {
+			continue
+		}
+		m := make(map[string]bool)
+		for _, line := range strings.Split(out, "\n") {
+			h := strings.TrimSpace(line)
+			if h != "" {
+				m[h] = true
+			}
+		}
+		sets[name] = m
+	}
+	for _, c := range commits {
+		if !c.assigned {
+			continue
+		}
+		orig := ""
+		for _, name := range orderAll {
+			m := sets[name]
+			if m != nil && m[c.hash] {
+				orig = laneName(name)
+				break
+			}
+		}
+		if orig != "" && orig != c.branch {
+			c.branch = orig
+			// keep assigned true and update on for later merge logic
+			markOn(c, orig)
+		}
+	}
+	return nil
 }
 
 func gitOutput(dir string, args ...string) (string, error) {

@@ -584,8 +584,18 @@ func TestLoadGraphFeatureKeepsCommitsWhenTrunkAdded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasSubject(onlyFeat, "ticket work") || !hasSubject(onlyFeat, "init") {
-		t.Fatalf("feature-only missing commits: %+v", subjects(onlyFeat))
+	byFeat := map[string]string{}
+	for _, c := range onlyFeat.Commits {
+		byFeat[c.Subject] = c.Branch
+	}
+	if byFeat["ticket work"] != "TR-2546" {
+		t.Fatalf("feature-only ticket work on %q want TR-2546: %+v", byFeat["ticket work"], subjects(onlyFeat))
+	}
+	if hasSubject(onlyFeat, "dev only") {
+		t.Fatalf("feature-only should not contain dev only (exclusive): %+v", subjects(onlyFeat))
+	}
+	if byFeat["init"] == "TR-2546" {
+		t.Fatalf("feature-only shared init should not be on TR-2546 when main hidden (exclusive), got %q", byFeat["init"])
 	}
 
 	both, err := loadGraph(dir, []string{"main", "TR-2546"})
@@ -599,8 +609,8 @@ func TestLoadGraphFeatureKeepsCommitsWhenTrunkAdded(t *testing.T) {
 	if bySubj["ticket work"] != "TR-2546" {
 		t.Fatalf("ticket work on %q, want TR-2546; lanes=%v", bySubj["ticket work"], bySubj)
 	}
-	if bySubj["init"] != "TR-2546" {
-		t.Fatalf("shared init stolen by %q", bySubj["init"])
+	if bySubj["init"] != "main" {
+		t.Fatalf("shared init on %q want main (original trunk), got %q", bySubj["init"], bySubj["init"])
 	}
 	if bySubj["dev only"] != "main" {
 		t.Fatalf("dev only on %q, want main", bySubj["dev only"])
@@ -619,8 +629,8 @@ func TestLoadGraphFeatureKeepsCommitsWhenTrunkAdded(t *testing.T) {
 	if bySubj["ticket work"] != "TR-2546" {
 		t.Fatalf("windowed ticket work on %q", bySubj["ticket work"])
 	}
-	if bySubj["init"] != "TR-2546" {
-		t.Fatalf("windowed shared init stolen by %q", bySubj["init"])
+	if bySubj["init"] != "main" {
+		t.Fatalf("windowed shared init on %q want main", bySubj["init"])
 	}
 	if bySubj["dev only"] != "main" {
 		t.Fatalf("windowed dev only on %q", bySubj["dev only"])
