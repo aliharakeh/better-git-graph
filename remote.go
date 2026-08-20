@@ -159,6 +159,7 @@ func gitRun(dir string, timeout time.Duration, args ...string) (string, error) {
 		defer cancel()
 	}
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	hideWindow(cmd)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

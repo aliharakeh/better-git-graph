@@ -909,6 +909,7 @@ func gitOutput(dir string, args ...string) (string, error) {
 
 func gitOutputStdin(dir, input string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	hideWindow(cmd)
 	if input != "" {
 		cmd.Stdin = strings.NewReader(input)
 	}
