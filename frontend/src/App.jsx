@@ -187,6 +187,7 @@ export default function App() {
   const [authors, setAuthors] = useState(() => new Set())
   const [kinds, setKinds] = useState(() => new Set(ALL_KINDS))
   const [branchKinds, setBranchKinds] = useState(() => new Set(ALL_BRANCH_KINDS))
+  const [showTags, setShowTags] = useState(true)
   const [historyLeft, setHistoryLeft] = useState(0)
   const [aiOpen, setAiOpen] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
@@ -249,6 +250,7 @@ export default function App() {
         setAuthorQuery("")
         setKinds(new Set(ALL_KINDS))
         setBranchKinds(new Set(ALL_BRANCH_KINDS))
+        setShowTags(true)
       } else if (!selected) {
         selected = [...visibleRef.current]
       }
@@ -796,7 +798,7 @@ export default function App() {
                   <summary className="inline-flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-border bg-transparent px-3 text-xs font-medium hover:bg-muted [&::-webkit-details-marker]:hidden">
                     <Filter className="size-4" />
                     Filters
-                    <span className="tabular-nums text-muted-foreground">{kinds.size + branchKinds.size}/{ALL_KINDS.length + ALL_BRANCH_KINDS.length}</span>
+                    <span className="tabular-nums text-muted-foreground">{kinds.size + branchKinds.size + (showTags ? 1 : 0)}/{ALL_KINDS.length + ALL_BRANCH_KINDS.length + 1}</span>
                   </summary>
                   <div className="absolute right-0 z-20 mt-1 w-40 rounded-md border border-border bg-card p-1 shadow-lg">
                     {KIND_OPTS.map((k) => (
@@ -810,6 +812,15 @@ export default function App() {
                         {k.label}
                       </label>
                     ))}
+                    <label className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted">
+                      <input
+                        type="checkbox"
+                        checked={showTags}
+                        onChange={() => setShowTags((v) => !v)}
+                        className="size-3.5 shrink-0 accent-primary"
+                      />
+                      Tagged
+                    </label>
                     <div className="my-1 border-t border-border" />
                     {BRANCH_OPTS.map((k) => (
                       <label key={k.id} className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted">
@@ -850,6 +861,7 @@ export default function App() {
                 rangeStart={axisRange?.[0]}
                 rangeEnd={axisRange?.[1]}
                 onViewChange={onViewChange}
+                showTags={showTags}
               />
             )}
           </div>

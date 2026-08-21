@@ -199,6 +199,7 @@ FILTER STATE
   authors           — allowed author names; view-side
   commit kinds      — PR / merge / normal; view-side
   lane kinds        — feature / hotfix / epic / others; view-side
+  tag labels        — show tag names under commit dots; view-side
   commit search     — subject or tag text; view-side
 ```
 
@@ -288,7 +289,7 @@ These run **after** the loaded graph exists. They do not add `--author`, `--grep
 ```mermaid
 flowchart TD
   A[Loaded graph] --> B["Keep lanes that are checked and match lane kind"]
-  B --> C[Keep commits on those lanes whose author and commit kind are allowed]
+  B --> C["Keep commits on those lanes whose author and commit kind are allowed"]
   C --> D["Keep merge edges that touch a kept lane and whose author and PR or merge kind are allowed"]
   D --> E{Commit search text?}
   E -->|yes| F["Hits: kept commits whose subject or tags contain the text"]
@@ -346,6 +347,10 @@ Focus never loads extra history. A dimmed lane is still in the loaded graph.
 
 Matches **subject** or **tag** on the view-sliced commits, newest first. Next / previous (Enter / Shift+Enter) jumps the axis to that hash and opens the inspector (a day cluster if that lane has more than one commit that calendar day).
 
+### Tagged
+
+One checkbox in the commit-kind section of the filter menu, right below PR / Merge / Normal — but it does not hide anything. It only toggles the tag labels drawn under the commit dots on the swimlanes: checked (default) draws the tag names, unchecked removes them. No Git calls, and no commits, merges, or lanes are filtered.
+
 ---
 
 ## From Git output to swimlanes
@@ -389,6 +394,7 @@ flowchart TD
 | PR / Merge / Normal | no | — | view slice |
 | Feature / Hotfix / Epic / Others | no | — | which loaded lanes are drawn |
 | Search commits | no | — | hit list, inspector, jump |
+| Tagged | no | — | tag labels under commit dots |
 | Refresh | yes | same `log` window as now | replace loaded graph |
 | Fetch | yes | `fetch --prune`, then catalog + graph as on open | catalog and graph |
 

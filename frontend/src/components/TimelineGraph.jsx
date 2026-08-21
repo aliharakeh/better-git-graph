@@ -72,7 +72,7 @@ function clusterByDay(commits) {
   return map
 }
 
-export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHashes, jumpTo, rangeStart, rangeEnd, onViewChange }) {
+export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHashes, jumpTo, rangeStart, rangeEnd, onViewChange, showTags }) {
   const wrapRef = useRef(null)
   const svgRef = useRef(null)
   const axisRef = useRef(null)
@@ -323,7 +323,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       .attr("font-weight", 700)
       .attr("pointer-events", "none")
       .text((d) => (d.count > 99 ? "99+" : d.count))
-    commitDots.filter((d) => d.tags?.length).append("text")
+    commitDots.filter((d) => showTags && d.tags?.length).append("text")
       .attr("y", (d) => innerR(d) + (d.isMerge ? 16 : 14))
       .attr("text-anchor", "middle")
       .attr("fill", "#fbbf24")
@@ -445,7 +445,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     return () => {
       d3.select(svgEl).on(".zoom", null).on("dblclick", null)
     }
-  }, [graph, related, size, selectedHash, matchHashes, jumpTo, onSelect, rangeStart, rangeEnd])
+  }, [graph, related, size, selectedHash, matchHashes, jumpTo, onSelect, rangeStart, rangeEnd, showTags])
 
   return (
     <div ref={wrapRef} className="relative h-full w-full overflow-hidden">
