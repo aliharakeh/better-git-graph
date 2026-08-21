@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,4 +88,89 @@ func saveAIConfig(cfg AIProviderConfig) error {
 		return err
 	}
 	return os.WriteFile(p, b, 0o600)
+}
+
+// normalizeProvider maps the provider names a user might type onto the
+// canonical ids used by the plugins. "google" is served by the googlegenai
+// plugin; every other provider goes through the OpenAI-compatible compat_oai
+// plugin.
+func normalizeProvider(p string) string {
+	p = strings.ToLower(strings.TrimSpace(p))
+	switch p {
+	case "google", "gemini", "googleai", "google-genai":
+		return "google"
+	default:
+		return p
+	}
+}
+
+// oaiDefaults are sensible starting values for well-known OpenAI-compatible
+// providers. An empty baseURL means "use the provider's default endpoint" (the
+// OpenAI SDK default). An empty model means the model is required from config.
+type oaiDefaults struct {
+	baseURL string
+	model   string
+}
+
+var openAICompatDefaults = map[string]oaiDefaults{
+	"opencode":   {baseURL: "http://localhost:4096/v1", model: "claude-sonnet-4-20250514"},
+	"openai":     {baseURL: "", model: "gpt-4o-mini"},
+	"openrouter": {baseURL: "https://openrouter.ai/api/v1", model: ""},
+	"anthropic":  {baseURL: "https://api.anthropic.com/v1", model: ""},
+	"deepseek":   {baseURL: "https://api.deepseek.com/v1", model: "deepseek-chat"},
+	"xai":        {baseURL: "https://api.x.ai/v1", model: ""},
+}
+
+// resolveAIConfig normalizes the provider and applies defaults, returning a
+// config that is guaranteed to be buildable (or an actionable error).
+func resolveAIConfig(cfg AIProviderConfig) (AIProviderConfig, error) {
+	p := normalizeProvider(cfg.Provider)
+	if p == "" {
+		return cfg, fmt.Errorf("no AI provider configured")
+	}
+	cfg.Provider = p
+
+	if p == "google" {
+		if cfg.APIKey == "" {
+			return cfg, fmt.Errorf("google models need an API key (GEMINI_API_KEY)")
+		}
+		if cfg.Model == "" {
+			cfg.Model = "gemini-2.5-flash"
+		}
+		return cfg, nil
+	}
+
+	if d, ok := openAICompatDefaults[p]; ok {
+		if cfg.BaseURL == "" {
+			cfg.BaseURL = d.baseURL
+		}
+		if cfg.Model == "" {
+			cfg.Model = d.model
+		}
+	} else if cfg.BaseURL == "" {
+		return cfg, fmt.Errorf("provider %q needs a baseURL pointing at an OpenAI-compatible endpoint", p)
+	}
+	if cfg.Model == "" {
+		return cfg, fmt.Errorf("no model configured for provider %q", p)
+	}
+	return cfg, nil
+}
+
+// oaiBaseURL normalizes a user-supplied OpenAI-compatible base URL so the SDK
+// builds the endpoint the user intended. The openai-go SDK resolves the
+// per-request path ("chat/completions") against the base URL, and that
+// resolution silently drops the last path segment when the base URL has no
+// trailing slash (so ".../v1" would become ".../chat/completions"). Ending the
+// root with a slash yields exactly <base>/chat/completions. If the user pasted
+// the full endpoint, that suffix is dropped first so it is not doubled.
+func oaiBaseURL(base string) string {
+	b := strings.TrimSpace(base)
+	if b == "" {
+		return ""
+	}
+	b = strings.TrimRight(b, "/")
+	if strings.HasSuffix(strings.ToLower(b), "/chat/completions") {
+		b = b[:len(b)-len("/chat/completions")]
+	}
+	return b + "/"
 }

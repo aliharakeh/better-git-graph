@@ -204,7 +204,7 @@ func TestAIModelAdvertisesTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, modelName, _, err := aiSvc.ensure(context.Background(), cfg)
+	g, modelName, _, err := aiSvc.ensure(context.Background(), cfg, registerGitTools)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,24 +230,24 @@ func TestAIServiceBuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g1, model, toolRef, err := aiSvc.ensure(context.Background(), cfg)
+	g1, model, refs, err := aiSvc.ensure(context.Background(), cfg, registerGitTools)
 	if err != nil {
 		t.Fatalf("ensure() = %v", err)
 	}
 	if model != "opencode/claude-sonnet-4-20250514" {
 		t.Fatalf("model = %q", model)
 	}
-	if toolRef == nil || toolRef.Name() != "get_commit_diff" {
-		t.Fatalf("expected get_commit_diff tool registered, got %v", toolRef)
+	if len(refs) != 1 || refs[0].Name() != "get_commit_diff" {
+		t.Fatalf("expected get_commit_diff tool registered, got %v", refs)
 	}
-	g2, _, tool2, err := aiSvc.ensure(context.Background(), cfg)
+	g2, _, refs2, err := aiSvc.ensure(context.Background(), cfg, registerGitTools)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if g1 != g2 {
 		t.Fatal("expected cached Genkit runtime for identical config")
 	}
-	if tool2 == nil || tool2.Name() != toolRef.Name() {
+	if len(refs2) != 1 || refs2[0].Name() != refs[0].Name() {
 		t.Fatal("expected the same tool ref on a reused runtime")
 	}
 
@@ -256,7 +256,7 @@ func TestAIServiceBuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g3, model3, _, err := aiSvc.ensure(context.Background(), cfg2)
+	g3, model3, _, err := aiSvc.ensure(context.Background(), cfg2, registerGitTools)
 	if err != nil {
 		t.Fatalf("ensure(cfg2) = %v", err)
 	}
