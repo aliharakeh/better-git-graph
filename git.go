@@ -914,6 +914,96 @@ func shortHash(h string) string {
 	return h
 }
 
+// hashRe matches a full or abbreviated commit hash, the only acceptable
+// commit reference the diff tool accepts from the model.
+var hashRe = regexp.MustCompile(`^[0-9a-fA-F]{4,64}$`)
+
+// commitDiffInput is the input to the get_commit_diff AI tool: which commit to
+// inspect and how to slice the diff (merge parent, single file, stat only).
+type commitDiffInput struct {
+	Hash    string `json:"hash" jsonschema:"required" jsonschema_description:"Full or abbreviated commit hash to inspect."`
+	Against string `json:"against,omitempty" jsonschema_description:"For merge commits, the parent to diff against: '1', '2', '3', or a base commit hash. Defaults to the first parent for merges, the single parent for regular commits."`
+	Path    string `json:"path,omitempty" jsonschema_description:"Restrict the diff to a single file path within the commit."`
+	Stat    bool   `json:"stat,omitempty" jsonschema_description:"Return only the per-file change summary instead of the full patch."`
+}
+
+// parentsOf returns the parent hashes of a commit in order (empty for a root
+// commit), erroring when the revision does not exist.
+func parentsOf(root, hash string) ([]string, error) {
+	out, err := gitOutput(root, "rev-list", "--parents", "-n", "1", hash)
+	if err != nil {
+		return nil, err
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("no such commit: %s", shortHash(hash))
+	}
+	return fields[1:], nil
+}
+
+// commitDiff renders the code changes a commit introduces as a unified diff
+// (or, with Stat, just the per-file summary). It backs the get_commit_diff AI
+// tool so the model can answer questions about the actual changed code.
+func commitDiff(root string, in commitDiffInput) (string, error) {
+	hash := strings.TrimSpace(in.Hash)
+	if !hashRe.MatchString(hash) {
+		return "", fmt.Errorf("invalid commit reference %q: use a full or abbreviated hash", hash)
+	}
+	parents, err := parentsOf(root, hash)
+	if err != nil {
+		return "", err
+	}
+
+	base := ""
+	if a := strings.TrimSpace(in.Against); a != "" {
+		switch {
+		case a == "1" || a == "2" || a == "3" || a == "4":
+			idx, _ := strconv.Atoi(a)
+			if idx > len(parents) {
+				return "", fmt.Errorf("commit %s has %d parent(s), cannot diff against parent %s", shortHash(hash), len(parents), a)
+			}
+			base = parents[idx-1]
+		case hashRe.MatchString(a):
+			base = a
+		default:
+			return "", fmt.Errorf(`"against" must be a parent index ("1".."4") or a base commit hash`)
+		}
+	} else if len(parents) > 1 {
+		base = parents[0] // merges default to the first parent
+	}
+
+	args := []string{"--no-color"}
+	if base != "" {
+		args = append([]string{"diff", "-U3"}, args...)
+		if in.Stat {
+			args = append(args, "--stat")
+		}
+		args = append(args, base, hash)
+	} else {
+		// Root commit: there is no parent to diff against, so whole patch.
+		args = append([]string{"show", "--format="}, args...)
+		if in.Stat {
+			args = append(args, "--stat")
+		}
+		args = append(args, hash)
+	}
+	if p := strings.TrimSpace(in.Path); p != "" {
+		args = append(args, "--", p)
+	}
+	out, err := gitOutput(root, args...)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out) == "" {
+		return "(no file changes for this commit)", nil
+	}
+	const maxDiff = 50000
+	if len(out) > maxDiff {
+		out = out[:maxDiff] + "\n… diff truncated at 50,000 bytes; pass stat=true or a specific file path to narrow it down"
+	}
+	return out, nil
+}
+
 func reassignToOriginalViaFirstParent(root string, commits map[string]*rawCommit, allTips map[string]string) error {
 	if len(commits) == 0 || len(allTips) == 0 {
 		return nil

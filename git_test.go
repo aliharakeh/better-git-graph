@@ -852,3 +852,78 @@ func subjects(g *RepoGraph) []string {
 func hasSubject(g *RepoGraph, want string) bool {
 	return contains(subjects(g), want)
 }
+
+func TestCommitDiff(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "base.txt", "base\n")
+	git("add", "base.txt")
+	git("commit", "-m", "base")
+
+	write(t, dir, "a.txt", "one\n")
+	git("add", "a.txt")
+	git("commit", "-m", "add a")
+	hash := gitOut(t, dir, "rev-parse", "HEAD")
+
+	// Default: unified diff of the commit against its parent.
+	out, err := commitDiff(dir, commitDiffInput{Hash: hash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "+one") {
+		t.Fatalf("diff missing added line:\n%s", out)
+	}
+
+	// Stat-only returns the file summary without the patch body.
+	stat, err := commitDiff(dir, commitDiffInput{Hash: hash, Stat: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stat, "a.txt") || strings.Contains(stat, "+one") {
+		t.Fatalf("stat should list a.txt without the patch body:\n%s", stat)
+	}
+
+	// Path filtering limits the diff to the requested file.
+	write(t, dir, "b.txt", "x\n")
+	git("add", "b.txt")
+	git("commit", "-m", "add b")
+	hash2 := gitOut(t, dir, "rev-parse", "HEAD")
+	onlyB, err := commitDiff(dir, commitDiffInput{Hash: hash2, Path: "b.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(onlyB, "a.txt") {
+		t.Fatalf("path filter leaked other files:\n%s", onlyB)
+	}
+
+	// Merge commits: parents are ordered and each is addressable.
+	git("checkout", "-b", "feature")
+	write(t, dir, "f.txt", "feat\n")
+	git("add", "f.txt")
+	git("commit", "-m", "feature work")
+	git("checkout", "main")
+	git("merge", "--no-ff", "-m", "Merge branch 'feature'", "feature")
+	hash3 := gitOut(t, dir, "rev-parse", "HEAD")
+	parents, err := parentsOf(dir, hash3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parents) != 2 {
+		t.Fatalf("merge has %d parents, want 2", len(parents))
+	}
+	for _, against := range []string{"1", "2"} {
+		if _, err := commitDiff(dir, commitDiffInput{Hash: hash3, Against: against}); err != nil {
+			t.Fatalf("against %s: %v", against, err)
+		}
+	}
+	if _, err := commitDiff(dir, commitDiffInput{Hash: hash3, Against: "4"}); err == nil {
+		t.Fatal("expected error for out-of-range parent index")
+	}
+
+	// Invalid references are rejected up front.
+	if _, err := commitDiff(dir, commitDiffInput{Hash: "nonsense!!"}); err == nil {
+		t.Fatal("expected error for invalid hash")
+	}
+	if _, err := parentsOf(dir, "deadbeef"); err == nil {
+		t.Fatal("expected error for unknown revision")
+	}
+}

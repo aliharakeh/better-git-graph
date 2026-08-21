@@ -1,11 +1,14 @@
-import { ChevronLeft, ChevronRight, CloudDownload, ExternalLink, Filter, FolderOpen, GitBranch, GitMerge, Loader2, RefreshCw, Search, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, CloudDownload, ExternalLink, Filter, FolderOpen, GitBranch, GitMerge, Loader2, RefreshCw, Search, Sparkles, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FetchRemote, GetRemote, ListBranches, LoadRepo, SaveRemoteToken, SelectRepo } from "../wailsjs/go/main/App";
+import { FetchRemote, GetAIConfig, GetRemote, ListBranches, LoadRepo, SaveRemoteToken, SelectRepo } from "../wailsjs/go/main/App";
 import { BrowserOpenURL } from "../wailsjs/runtime/runtime";
+import { AIConfigDialog } from "./components/AIConfigDialog";
+import { CommitChatDialog } from "./components/CommitChatDialog";
 import { TimelineGraph } from "./components/TimelineGraph";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
+import { wailsError } from "./lib/utils";
 
 function laneName(name) {
   return String(name || "").replace(/^refs\/(heads|remotes|tags)\//, "").replace(/^(origin|upstream)\//, "")
@@ -13,6 +16,19 @@ function laneName(name) {
 
 function authorName(c) {
   return c.author || "(unknown)"
+}
+
+// A compact, human-readable list of the commits in scope, passed to the AI so
+// it knows which hashes the get_commit_diff tool may be asked about.
+function commitChatContext(inspect) {
+  const items = inspect?.kind === "cluster" ? inspect.commits || [] : inspect ? [inspect] : []
+  return items
+    .map((c) => {
+      const meta = [c.hash, c.branch, authorName(c), c.timestamp ? new Date(c.timestamp).toISOString() : ""].filter(Boolean).join(" ")
+      const merge = c.isMerge || c.sourceBranch ? " [merge]" : ""
+      return `- ${meta}${merge} — ${c.subject || ""}${c.tags?.length ? ` (${c.tags.join(", ")})` : ""}`
+    })
+    .join("\n")
 }
 
 function isPrSubject(subject) {
@@ -66,12 +82,6 @@ function fmtTime(ts) {
 function localDay(ts) {
   const d = new Date(ts)
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
-}
-
-function wailsError(err) {
-  if (!err) return "unknown error"
-  if (typeof err === "string") return err
-  return err.message || String(err)
 }
 
 function lanesByUpdated(list) {
@@ -178,6 +188,9 @@ export default function App() {
   const [kinds, setKinds] = useState(() => new Set(ALL_KINDS))
   const [branchKinds, setBranchKinds] = useState(() => new Set(ALL_BRANCH_KINDS))
   const [historyLeft, setHistoryLeft] = useState(0)
+  const [aiOpen, setAiOpen] = useState(false)
+  const [chatOpen, setChatOpen] = useState(false)
+  const [aiInfo, setAiInfo] = useState(null)
   const filterRef = useRef(null)
   const visibleRef = useRef(visible)
   visibleRef.current = visible
@@ -194,6 +207,18 @@ export default function App() {
     }
     document.addEventListener("pointerdown", close)
     return () => document.removeEventListener("pointerdown", close)
+  }, [])
+
+  async function refreshAI() {
+    try {
+      setAiInfo(await GetAIConfig())
+    } catch {
+      setAiInfo(null)
+    }
+  }
+
+  useEffect(() => {
+    refreshAI()
   }, [])
 
   async function load(nextPath, { reset = true, branches } = {}) {
@@ -499,6 +524,19 @@ export default function App() {
         <GitMerge className="mr-2 size-4 text-primary" />
         <span className="text-sm font-semibold">Git Merge Timeline</span>
         <span className="ml-2 text-xs text-muted-foreground">Network history of branch merges</span>
+        <div className="no-drag ml-auto flex items-center">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1.5 px-2 text-xs text-muted-foreground"
+            onClick={() => setAiOpen(true)}
+            title={aiInfo?.provider ? `AI provider: ${aiInfo.provider}${aiInfo.model ? ` · ${aiInfo.model}` : ""}` : "Configure AI provider"}
+          >
+            <Sparkles />
+            AI
+            <span className={`size-1.5 rounded-full ${aiInfo?.provider ? "bg-emerald-400" : "bg-muted-foreground/40"}`} />
+          </Button>
+        </div>
       </header>
 
       <div className="no-drag relative flex min-h-0 flex-1 overflow-hidden">
@@ -825,11 +863,25 @@ export default function App() {
         >
           {inspect && (
             <>
-              <div className="mb-3 flex items-center justify-between">
+              <div className="mb-3 flex items-center justify-between gap-1">
                 <h3 className="text-sm font-semibold">Inspector</h3>
-                <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => setSelected(null)} title="Close">
-                  <X className="size-4" />
-                </button>
+                <div className="flex items-center gap-1">
+                  {aiInfo?.provider && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-xs text-muted-foreground"
+                      onClick={() => setChatOpen(true)}
+                      title="Ask the AI about these commits"
+                    >
+                      <Sparkles />
+                      Ask AI
+                    </Button>
+                  )}
+                  <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => setSelected(null)} title="Close">
+                    <X className="size-4" />
+                  </button>
+                </div>
               </div>
               {inspect.kind === "merge" ? (
                 <dl className="space-y-2 text-xs">
@@ -878,6 +930,19 @@ export default function App() {
           )}
         </aside>
       </div>
+
+      {aiOpen && (
+        <AIConfigDialog
+          onClose={() => {
+            setAiOpen(false)
+            refreshAI()
+          }}
+          onSaved={refreshAI}
+        />
+      )}
+      {chatOpen && inspect && (
+        <CommitChatDialog path={graph?.path || path} context={commitChatContext(inspect)} onClose={() => setChatOpen(false)} />
+      )}
     </div>
   )
 }

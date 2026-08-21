@@ -89,13 +89,9 @@ func isSSHURL(u string) bool {
 }
 
 func authPath() (string, error) {
-	dir := authDir
-	if dir == "" {
-		d, err := os.UserConfigDir()
-		if err != nil {
-			return "", err
-		}
-		dir = filepath.Join(d, "git-merge-timeline")
+	dir, err := configDir()
+	if err != nil {
+		return "", err
 	}
 	return filepath.Join(dir, "auth.json"), nil
 }

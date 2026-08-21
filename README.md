@@ -88,7 +88,21 @@ Click a node to open a sliding panel:
 - **Merge** — source/target branches, exclusive commit count, plus the fields above
 - **Cluster** — that day’s commits with time and author chips
 
-### Not included
+### AI summaries (Genkit)
+
+Run the app's AI features against a model provider via [Firebase Genkit](https://firebase.google.com/docs/genkit). Configure the provider in the app (or by editing `ai.json` in the app config directory); all calls then route to that model, so switching providers is a config change.
+
+- **OpenAI-compatible** — `opencode`, `openai`, `openrouter`, `anthropic`, `deepseek`, `xai`, or any other base URL. Uses Genkit's `compat_oai` plugin with the endpoint's chat-completions API.
+  - `opencode` defaults to `http://localhost:4096/v1`, the local server from `opencode serve`.
+- **Google** — `google` (Gemini) via the `googlegenai` plugin, keyed by `GEMINI_API_KEY`.
+
+Configure the provider via **Test AI** (see below), the app config UI, or by editing `ai.json` in the app config directory.
+
+- **Test AI** — sends a tiny prompt to verify credentials and connectivity.
+
+New AI features are added as backend methods; `aiChat` in `ai.go` holds the generic model call they share.
+
+## Not included
 
 No clone, pull, push, checkout, commit, merge, rebase, stash, branch create/delete, tagging, GitHub/GitLab API, PR list, or OAuth login.
 
