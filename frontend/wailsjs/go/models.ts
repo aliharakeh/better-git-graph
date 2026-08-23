@@ -132,6 +132,7 @@ export namespace main {
 	}
 	export class MergeEvent {
 	    hash: string;
+	    kind?: string;
 	    sourceBranch: string;
 	    targetBranch: string;
 	    sourceHash: string;
@@ -147,6 +148,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.hash = source["hash"];
+	        this.kind = source["kind"];
 	        this.sourceBranch = source["sourceBranch"];
 	        this.targetBranch = source["targetBranch"];
 	        this.sourceHash = source["sourceHash"];

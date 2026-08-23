@@ -25,6 +25,7 @@ type CommitNode struct {
 
 type MergeEvent struct {
 	Hash         string `json:"hash"`
+	Kind         string `json:"kind,omitempty"`
 	SourceBranch string `json:"sourceBranch"`
 	TargetBranch string `json:"targetBranch"`
 	SourceHash   string `json:"sourceHash"`
@@ -91,20 +92,18 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 		return nil, err
 	}
 	branchTips := allTips
-	var revs []string
 	if only != nil {
 		branchTips = filterTips(allTips, only)
 		if len(branchTips) == 0 {
 			return &RepoGraph{Path: root, CommitURL: commitURLPrefix(toWebBase(remoteURL(root)))}, nil
 		}
-		revs = values(branchTips)
 	}
 	windowed := !since.IsZero() || !until.IsZero()
 	var commits map[string]*rawCommit
 	if windowed {
-		commits, err = listCommitsRange(root, branchTips, since, until)
+		commits, err = listCommitsRange(root, since, until)
 	} else {
-		commits, err = listCommits(root, revs)
+		commits, err = listCommits(root)
 	}
 	if err != nil {
 		return nil, err
@@ -115,18 +114,11 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 	}
 
 	order := sortBranchNames(keys(branchTips))
-	if !windowed {
-		assignLanes(claimOrder(order), branchTips, commits)
-		assignOffSpineMerges(commits, order)
-		if only == nil {
-			// ponytail: name deleted lanes from merge msg / remotes / name-rev; reflog if still unnamed
-			order = append(order, ensureMergeSourceLanes(root, branchTips, commits)...)
-		}
-	}
-	// when filtering, reassign to original branch via first-parent hashes so hidden source commits don't collapse onto visible descendant
-	if only != nil && len(allTips) > len(branchTips) {
-		_ = reassignToOriginalViaFirstParent(root, commits, allTips)
-	}
+	ranked := claimOrder(order)
+	assignLanes(root, ranked, branchTips, commits)
+	assignReachable(root, ranked, branchTips, commits, since, until)
+	assignOffSpineMerges(commits, order)
+	absorbDeletedMergeSources(root, branchTips, commits, since, until)
 
 	nodes := make([]CommitNode, 0, len(commits))
 	merges := make([]MergeEvent, 0)
@@ -180,7 +172,7 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 			srcBranch = laneName(srcBranch)
 			if srcBranch == laneName(target) {
 				srcBranch = target
-			} else if srcBranch != "" {
+			} else if srcBranch != "" && known[srcBranch] {
 				used[srcBranch] = true
 			}
 			merges = append(merges, MergeEvent{
@@ -195,6 +187,8 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 			})
 		}
 	}
+
+	merges = append(merges, branchStarts(commits, known)...)
 
 	branches := make([]string, 0, len(order))
 	seenBr := map[string]bool{}
@@ -393,53 +387,12 @@ func filterTips(tips map[string]string, want []string) map[string]string {
 	return out
 }
 
-func listCommits(root string, revs []string) (map[string]*rawCommit, error) {
-	args := []string{"log", "--pretty=format:%H%x1f%P%x1f%an%x1f%aI%x1f%s"}
-	if len(revs) == 0 {
-		args = append(args, "--all")
-	} else {
-		args = append(args, revs...)
-	}
-	return parseLog(gitOutput(root, args...))
+func listCommits(root string) (map[string]*rawCommit, error) {
+	return parseLog(gitOutput(root, "log", "--pretty=format:%H%x1f%P%x1f%an%x1f%aI%x1f%s", "--all"))
 }
 
-func listCommitsRange(root string, tips map[string]string, since, until time.Time) (map[string]*rawCommit, error) {
-	commits := map[string]*rawCommit{}
-	for _, name := range claimOrder(keys(tips)) {
-		lane := laneName(name)
-		chunk, err := parseLog(gitOutput(root, rangeLogArgs(tips[name], since, until, "--first-parent")...))
-		if err != nil {
-			return nil, err
-		}
-		for hash, c := range chunk {
-			if existing := commits[hash]; existing != nil {
-				markOn(existing, lane)
-				continue
-			}
-			c.assigned = true
-			c.branch = lane
-			markOn(c, lane)
-			commits[hash] = c
-		}
-		// first-parent misses merges that landed via "Merge branch 'dev' of remote into dev"
-		side, err := parseLog(gitOutput(root, rangeLogArgs(tips[name], since, until, "--merges")...))
-		if err != nil {
-			return nil, err
-		}
-		for hash, c := range side {
-			if existing := commits[hash]; existing != nil {
-				continue
-			}
-			if !belongsOnLane(c, lane, commits) {
-				continue
-			}
-			c.assigned = true
-			c.branch = lane
-			markOn(c, lane)
-			commits[hash] = c
-		}
-	}
-	return commits, nil
+func listCommitsRange(root string, since, until time.Time) (map[string]*rawCommit, error) {
+	return parseLog(gitOutput(root, rangeLogArgs("--all", since, until)...))
 }
 
 func rangeLogArgs(tip string, since, until time.Time, extra ...string) []string {
@@ -496,24 +449,52 @@ func parseLog(out string, err error) (map[string]*rawCommit, error) {
 	return commits, nil
 }
 
-func assignLanes(order []string, tips map[string]string, commits map[string]*rawCommit) {
+func assignLanes(root string, order []string, tips map[string]string, commits map[string]*rawCommit) {
 	for _, name := range order {
 		lane := laneName(name)
-		walk := tips[name]
-		for walk != "" {
-			c := commits[walk]
+		tip := tips[name]
+		if tip == "" {
+			continue
+		}
+		out, err := gitOutput(root, "rev-list", "--first-parent", tip)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(out, "\n") {
+			c := commits[strings.TrimSpace(line)]
 			if c == nil {
-				break
+				continue
 			}
 			markOn(c, lane)
 			if !c.assigned {
 				c.assigned = true
 				c.branch = lane
 			}
-			if len(c.parents) == 0 {
-				break
+		}
+	}
+}
+
+func assignReachable(root string, order []string, tips map[string]string, commits map[string]*rawCommit, since, until time.Time) {
+	for _, name := range order {
+		lane := laneName(name)
+		tip := tips[name]
+		if tip == "" {
+			continue
+		}
+		chunk, err := parseLog(gitOutput(root, rangeLogArgs(tip, since, until)...))
+		if err != nil {
+			continue
+		}
+		for hash := range chunk {
+			c := commits[hash]
+			if c == nil {
+				continue
 			}
-			walk = c.parents[0]
+			if !c.assigned {
+				c.assigned = true
+				c.branch = lane
+			}
+			markOn(c, lane)
 		}
 	}
 }
@@ -559,87 +540,92 @@ func destLane(subject string) string {
 	return dst
 }
 
-func belongsOnLane(c *rawCommit, lane string, commits map[string]*rawCommit) bool {
-	d := destLane(c.subject)
-	if d == lane {
-		return true
-	}
-	if d != "" {
-		return false
-	}
-	s := strings.ToLower(strings.TrimSpace(c.subject))
-	l := strings.ToLower(lane)
-	if strings.HasSuffix(s, " into "+l) || strings.HasSuffix(s, " into '"+l+"'") {
-		return true
-	}
-	if len(c.parents) > 0 {
-		if p := commits[c.parents[0]]; p != nil && p.assigned && p.branch == lane {
-			return true
+func branchStarts(commits map[string]*rawCommit, known map[string]bool) []MergeEvent {
+	var out []MergeEvent
+	for _, c := range commits {
+		if !c.assigned || c.branch == "" || len(c.parents) != 1 {
+			continue
 		}
+		dst := laneName(c.branch)
+		if !known[dst] {
+			continue
+		}
+		p := commits[c.parents[0]]
+		if p == nil || !p.assigned || p.branch == "" {
+			continue
+		}
+		src := laneName(p.branch)
+		if src == dst || !known[src] {
+			continue
+		}
+		out = append(out, MergeEvent{
+			Hash:         c.hash,
+			Kind:         "branch",
+			SourceBranch: src,
+			TargetBranch: dst,
+			SourceHash:   p.hash,
+			Timestamp:    c.at.Format(time.RFC3339),
+			Author:       c.author,
+			Subject:      "Branch from " + src,
+			CommitCount:  1,
+		})
 	}
-	if mergePR.MatchString(c.subject) || mergeBB.MatchString(c.subject) {
-		return true
-	}
-	return false
+	return out
 }
 
-func ensureMergeSourceLanes(root string, tips map[string]string, commits map[string]*rawCommit) []string {
-	seen := map[string]bool{}
-	for name := range tips {
-		seen[laneName(name)] = true
+func firstParentSet(root string, tips map[string]string) map[string]bool {
+	if len(tips) == 0 {
+		return map[string]bool{}
 	}
-	type src struct{ hash, subject string }
-	var pending []src
+	out, err := gitOutput(root, append([]string{"rev-list", "--first-parent"}, values(tips)...)...)
+	if err != nil || out == "" {
+		return map[string]bool{}
+	}
+	live := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		if h := strings.TrimSpace(line); h != "" {
+			live[h] = true
+		}
+	}
+	return live
+}
+
+func absorbDeletedMergeSources(root string, tips map[string]string, commits map[string]*rawCommit, since, until time.Time) {
+	live := firstParentSet(root, tips)
 	for _, c := range commits {
-		if len(c.parents) < 2 || !c.assigned {
+		if len(c.parents) < 2 || !c.assigned || c.branch == "" {
 			continue
+		}
+		lane := c.branch
+		if d := destLane(c.subject); d != "" {
+			for name := range tips {
+				if laneName(name) == d {
+					lane = d
+					break
+				}
+			}
 		}
 		for _, srcHash := range c.parents[1:] {
-			parent := commits[srcHash]
-			if parent == nil || (parent.assigned && parent.branch != "") {
+			if live[srcHash] {
 				continue
 			}
-			pending = append(pending, src{srcHash, c.subject})
-		}
-	}
-	var query []string
-	for _, p := range pending {
-		if name, _ := parseMergeSubject(p.subject); name == "" {
-			query = append(query, p.hash)
-		}
-	}
-	revs := nameRevs(root, query)
-	var extra []string
-	for _, p := range pending {
-		name, fromMsg := mergeSourceName(p.subject, revs[p.hash])
-		if name == "" {
-			name = "lost/" + shortHash(p.hash)
-		} else if seen[name] {
-			if fromMsg {
-				assignLanes([]string{name}, map[string]string{name: p.hash}, commits)
+			if commits[srcHash] == nil {
+				chunk, err := parseLog(gitOutput(root, rangeLogArgs(srcHash, since, until, "--first-parent")...))
+				if err != nil {
+					continue
+				}
+				for h, nc := range chunk {
+					if commits[h] == nil {
+						commits[h] = nc
+					}
+				}
+			}
+			if commits[srcHash] == nil {
 				continue
 			}
-			name = "lost/" + shortHash(p.hash)
+			assignLanes(root, []string{lane}, map[string]string{lane: srcHash}, commits)
 		}
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		tips[name] = p.hash
-		extra = append(extra, name)
 	}
-	sort.Strings(extra)
-	assignLanes(extra, tips, commits)
-	return extra
-}
-
-func mergeSourceName(subject, rev string) (name string, fromMsg bool) {
-	name, _ = parseMergeSubject(subject)
-	name = cleanLaneName(name)
-	if name != "" {
-		return name, true
-	}
-	return cleanLaneName(rev), false
 }
 
 func cleanLaneName(name string) string {
@@ -648,25 +634,6 @@ func cleanLaneName(name string) string {
 		return ""
 	}
 	return name
-}
-
-func nameRevs(root string, hashes []string) map[string]string {
-	if len(hashes) == 0 {
-		return nil
-	}
-	out, err := gitOutputStdin(root, strings.Join(hashes, "\n")+"\n", "name-rev", "--name-only", "--stdin")
-	if err != nil || out == "" {
-		return nil
-	}
-	lines := strings.Split(out, "\n")
-	names := make(map[string]string, len(hashes))
-	for i, h := range hashes {
-		if i >= len(lines) {
-			break
-		}
-		names[h] = lines[i]
-	}
-	return names
 }
 
 func countExclusive(from, exclude string, commits map[string]*rawCommit) int {
@@ -1002,51 +969,6 @@ func commitDiff(root string, in commitDiffInput) (string, error) {
 		out = out[:maxDiff] + "\n… diff truncated at 50,000 bytes; pass stat=true or a specific file path to narrow it down"
 	}
 	return out, nil
-}
-
-func reassignToOriginalViaFirstParent(root string, commits map[string]*rawCommit, allTips map[string]string) error {
-	if len(commits) == 0 || len(allTips) == 0 {
-		return nil
-	}
-	orderAll := claimOrder(sortBranchNames(keys(allTips)))
-	sets := make(map[string]map[string]bool, len(allTips))
-	for _, name := range orderAll {
-		tip := allTips[name]
-		if tip == "" {
-			continue
-		}
-		out, err := gitOutput(root, "rev-list", "--first-parent", tip)
-		if err != nil {
-			continue
-		}
-		m := make(map[string]bool)
-		for _, line := range strings.Split(out, "\n") {
-			h := strings.TrimSpace(line)
-			if h != "" {
-				m[h] = true
-			}
-		}
-		sets[name] = m
-	}
-	for _, c := range commits {
-		if !c.assigned {
-			continue
-		}
-		orig := ""
-		for _, name := range orderAll {
-			m := sets[name]
-			if m != nil && m[c.hash] {
-				orig = laneName(name)
-				break
-			}
-		}
-		if orig != "" && orig != c.branch {
-			c.branch = orig
-			// keep assigned true and update on for later merge logic
-			markOn(c, orig)
-		}
-	}
-	return nil
 }
 
 func gitOutput(dir string, args ...string) (string, error) {

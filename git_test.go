@@ -98,10 +98,20 @@ func TestLoadGraphMerge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(g.Merges) != 1 {
-		t.Fatalf("merges = %d, want 1: %+v", len(g.Merges), g.Merges)
+	var m MergeEvent
+	fork := false
+	for _, ev := range g.Merges {
+		if ev.Kind == "branch" && ev.SourceBranch == "main" && ev.TargetBranch == "feature/login" {
+			fork = true
+			continue
+		}
+		if ev.Kind != "branch" {
+			m = ev
+		}
 	}
-	m := g.Merges[0]
+	if !fork {
+		t.Fatalf("missing branch-start curve main -> feature/login: %+v", g.Merges)
+	}
 	if m.SourceBranch != "feature/login" || m.TargetBranch != "main" {
 		t.Fatalf("merge %s -> %s", m.SourceBranch, m.TargetBranch)
 	}
@@ -110,6 +120,34 @@ func TestLoadGraphMerge(t *testing.T) {
 	}
 	if _, err := time.Parse(time.RFC3339, m.Timestamp); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLoadGraphBranchStart(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "README.md", "a\n")
+	git("add", "README.md")
+	git("commit", "-m", "init")
+	git("checkout", "-b", "feature/login")
+	write(t, dir, "login.txt", "ok\n")
+	git("add", "login.txt")
+	git("commit", "-m", "add login")
+
+	g, err := LoadGraph(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range g.Merges {
+		if m.Kind == "branch" && m.SourceBranch == "main" && m.TargetBranch == "feature/login" {
+			found = true
+			if m.SourceHash == "" || m.Hash == "" {
+				t.Fatalf("branch start missing hashes: %+v", m)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("merges = %+v, want branch-start main -> feature/login", g.Merges)
 	}
 }
 
@@ -136,8 +174,20 @@ func TestLoadGraphDeletedBranchKeepsName(t *testing.T) {
 	if g.Merges[0].SourceBranch != "feature/login" {
 		t.Fatalf("source = %q, want feature/login", g.Merges[0].SourceBranch)
 	}
-	if !contains(g.Branches, "feature/login") {
-		t.Fatalf("branches = %v, want feature/login", g.Branches)
+	if contains(g.Branches, "feature/login") {
+		t.Fatalf("branches = %v, deleted source should not keep a lane", g.Branches)
+	}
+	found := false
+	for _, c := range g.Commits {
+		if c.Subject == "add login" {
+			found = true
+			if c.Branch != "main" {
+				t.Fatalf("add login on %q, want main (first parent)", c.Branch)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("missing deleted-branch commit: %+v", subjects(g))
 	}
 }
 
@@ -188,13 +238,25 @@ func TestLoadGraphRecreatedBranchKeepsName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(g.Merges) != 2 {
-		t.Fatalf("merges = %d, want 2: %+v", len(g.Merges), g.Merges)
-	}
+	nMerge := 0
+	fork := false
 	for _, m := range g.Merges {
+		if m.Kind == "branch" {
+			if m.SourceBranch == "main" && m.TargetBranch == "feature" {
+				fork = true
+			}
+			continue
+		}
+		nMerge++
 		if m.SourceBranch != "feature" {
 			t.Fatalf("source = %q, want feature", m.SourceBranch)
 		}
+	}
+	if nMerge != 2 {
+		t.Fatalf("merges = %d, want 2: %+v", nMerge, g.Merges)
+	}
+	if !fork {
+		t.Fatalf("missing branch-start curve: %+v", g.Merges)
 	}
 	n := 0
 	for _, b := range g.Branches {
@@ -310,14 +372,23 @@ func TestLoadGraphCustomMergeKeepsSourceLane(t *testing.T) {
 		t.Fatalf("merges = %d, want 1: %+v", len(g.Merges), g.Merges)
 	}
 	m := g.Merges[0]
-	if m.SourceBranch == "" || m.SourceBranch == "main" {
-		t.Fatalf("source lane dropped: %+v branches=%v", m, g.Branches)
-	}
 	if m.TargetBranch != "main" {
 		t.Fatalf("target = %q", m.TargetBranch)
 	}
-	if !contains(g.Branches, m.SourceBranch) {
-		t.Fatalf("missing source lane %q in %v", m.SourceBranch, g.Branches)
+	if contains(g.Branches, "feature") {
+		t.Fatalf("branches = %v, deleted source should not keep a lane", g.Branches)
+	}
+	found := false
+	for _, c := range g.Commits {
+		if c.Subject == "feat work" {
+			found = true
+			if c.Branch != "main" {
+				t.Fatalf("feat work on %q, want main (first parent)", c.Branch)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("missing deleted-branch commit: %+v", subjects(g))
 	}
 }
 
@@ -343,6 +414,18 @@ func TestLoadGraphSelectedBranches(t *testing.T) {
 	}
 	if contains(g.Branches, "feature/secret") {
 		t.Fatalf("branches = %v, feature/secret should stay unloaded", g.Branches)
+	}
+
+	since := time.Now().UTC().Add(-24 * time.Hour)
+	until := time.Now().UTC().Add(time.Hour)
+	windowed, err := loadGraphAt(dir, []string{"main"}, since, until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range windowed.Commits {
+		if c.Subject == "secret work" {
+			t.Fatalf("windowed main still loaded unconnected feature: %+v", c)
+		}
 	}
 
 	all, err := LoadGraph(dir)
@@ -378,16 +461,52 @@ func TestLoadGraphHidesMergedBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !contains(g.Branches, "feature/login") {
-		t.Fatalf("branches = %v, want feature/login comet lane", g.Branches)
+	if contains(g.Branches, "feature/login") {
+		t.Fatalf("branches = %v, unselected source should not be a lane", g.Branches)
 	}
+	found := false
 	for _, c := range g.Commits {
 		if c.Subject == "add login" {
-			t.Fatalf("hidden branch commit still loaded: %+v", c)
+			found = true
+			if c.Branch != "main" {
+				t.Fatalf("add login on %q, want main (source not visible)", c.Branch)
+			}
 		}
+	}
+	if !found {
+		t.Fatalf("merged source commit missing on selected lane: %+v", subjects(g))
 	}
 	if len(g.Merges) != 1 || g.Merges[0].TargetBranch != "main" || g.Merges[0].SourceBranch != "feature/login" {
 		t.Fatalf("merges = %+v", g.Merges)
+	}
+
+	both, err := loadGraph(dir, []string{"main", "feature/login"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range both.Commits {
+		if c.Subject == "add login" && c.Branch != "feature/login" {
+			t.Fatalf("add login on %q, want feature/login when that branch is visible", c.Branch)
+		}
+	}
+
+	since := time.Now().UTC().Add(-24 * time.Hour)
+	until := time.Now().UTC().Add(time.Hour)
+	windowed, err := loadGraphAt(dir, []string{"main"}, since, until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found = false
+	for _, c := range windowed.Commits {
+		if c.Subject == "add login" {
+			found = true
+			if c.Branch != "main" {
+				t.Fatalf("windowed add login on %q, want main", c.Branch)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("windowed merged source missing: %+v", subjects(windowed))
 	}
 }
 
@@ -427,8 +546,8 @@ func TestLoadGraphOffSpineMergeIntoLane(t *testing.T) {
 			if !hasSubject(g, want) {
 				t.Fatalf("missing off-spine merge: %+v", subjects(g))
 			}
-			if hasSubject(g, "feat") {
-				t.Fatalf("source branch commits landed on main: %+v", subjects(g))
+			if !hasSubject(g, "feat") {
+				t.Fatalf("deleted source commit missing on first parent: %+v", subjects(g))
 			}
 			for _, c := range g.Commits {
 				if c.Branch != "main" {
@@ -594,8 +713,8 @@ func TestLoadGraphFeatureKeepsCommitsWhenTrunkAdded(t *testing.T) {
 	if hasSubject(onlyFeat, "dev only") {
 		t.Fatalf("feature-only should not contain dev only (exclusive): %+v", subjects(onlyFeat))
 	}
-	if byFeat["init"] == "TR-2546" {
-		t.Fatalf("feature-only shared init should not be on TR-2546 when main hidden (exclusive), got %q", byFeat["init"])
+	if byFeat["init"] != "TR-2546" {
+		t.Fatalf("feature-only shared init on %q want TR-2546 (main not visible)", byFeat["init"])
 	}
 
 	both, err := loadGraph(dir, []string{"main", "TR-2546"})

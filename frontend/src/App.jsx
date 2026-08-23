@@ -199,7 +199,7 @@ export default function App() {
   pathRef.current = path
   const loadSeq = useRef(0)
   const reloadTimer = useRef(0)
-  const loadedRef = useRef({ from: 0, to: 0, branches: "", pastDone: false, futureDone: false, emptyPast: 0, emptyFuture: 0 })
+  const loadedRef = useRef({ from: 0, to: 0, branches: "", pastDone: false, futureDone: false })
   const wantRef = useRef({ from: 0, to: 0 })
   const filling = useRef(false)
   useEffect(() => {
@@ -265,7 +265,7 @@ export default function App() {
       }
       const data = await LoadRepo(target, selected, iso(from), iso(to))
       if (gen !== loadSeq.current) return
-      loadedRef.current = { from, to, branches: branchKey(selected), pastDone: false, futureDone: false, emptyPast: 0, emptyFuture: 0 }
+      loadedRef.current = { from, to, branches: branchKey(selected), pastDone: false, futureDone: false }
       setGraph(data)
       setPath(data.path || target)
       try {
@@ -341,12 +341,11 @@ export default function App() {
           const chunk = await LoadRepo(target, selected, iso(since), iso(until))
           if (gen !== loadSeq.current) return
           const empty = chunkEmpty(chunk)
-          const emptyPast = empty ? cur.emptyPast + 1 : 0
           if (!empty) {
             setGraph((prev) => mergeGraphs(prev, chunk))
             addAuthors(chunk?.commits)
           }
-          loadedRef.current = { ...loadedRef.current, from: since, emptyPast, pastDone: emptyPast >= 3 }
+          loadedRef.current = { ...loadedRef.current, from: since, pastDone: empty }
           continue
         }
         if (cur.to < want.to && !cur.futureDone) {
@@ -359,12 +358,11 @@ export default function App() {
           const chunk = await LoadRepo(target, selected, iso(since), iso(until))
           if (gen !== loadSeq.current) return
           const empty = chunkEmpty(chunk)
-          const emptyFuture = empty ? cur.emptyFuture + 1 : 0
           if (!empty) {
             setGraph((prev) => mergeGraphs(prev, chunk))
             addAuthors(chunk?.commits)
           }
-          loadedRef.current = { ...loadedRef.current, to: until, emptyFuture, futureDone: emptyFuture >= 3 }
+          loadedRef.current = { ...loadedRef.current, to: until, futureDone: empty }
           continue
         }
         break
@@ -459,7 +457,11 @@ export default function App() {
       ...m,
       sourceBranch: laneName(m.sourceBranch),
       targetBranch: laneName(m.targetBranch),
-    })).filter((m) => (shown.has(m.targetBranch) || shown.has(m.sourceBranch)) && match(m, isPrSubject(m.subject) ? "pr" : "merge"))
+    })).filter((m) => {
+      if (!(shown.has(m.targetBranch) || shown.has(m.sourceBranch))) return false
+      if (m.kind === "branch") return true
+      return match(m, isPrSubject(m.subject) ? "pr" : "merge")
+    })
     return {
       ...graph,
       branches: names,
