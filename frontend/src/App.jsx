@@ -222,7 +222,7 @@ export default function App() {
     refreshAI()
   }, [])
 
-  async function load(nextPath, { reset = true, branches } = {}) {
+  async function load(nextPath, { reset = true, branches, restartWindow = false } = {}) {
     const target = (nextPath ?? path).trim()
     if (!target) {
       setError("Enter a repository path")
@@ -255,14 +255,16 @@ export default function App() {
         selected = [...visibleRef.current]
       }
       const now = Date.now()
-      const viewTo = now
-      const viewFrom = addMonths(now, -CHUNK_MONTHS)
-      const from = reset || !loadedRef.current.from ? addMonths(now, -CHUNK_MONTHS) : loadedRef.current.from
-      const to = reset || !loadedRef.current.to ? now : loadedRef.current.to
-      if (reset || !loadedRef.current.from) {
-        setAxisRange([viewFrom, viewTo])
-        wantRef.current = { from: viewFrom, to: viewTo }
+      const initTo = now
+      const initFrom = addMonths(now, -CHUNK_MONTHS)
+      const fresh = reset || restartWindow || !loadedRef.current.from
+      const from = fresh ? initFrom : loadedRef.current.from
+      const to = fresh ? initTo : loadedRef.current.to
+      if (fresh) {
+        setAxisRange([initFrom, initTo])
+        wantRef.current = { from: initFrom, to: initTo }
       }
+      filling.current = false
       const data = await LoadRepo(target, selected, iso(from), iso(to))
       if (gen !== loadSeq.current) return
       loadedRef.current = { from, to, branches: branchKey(selected), pastDone: false, futureDone: false }
@@ -298,7 +300,7 @@ export default function App() {
   function applyVisible(next, { debounce = false } = {}) {
     setVisible(next)
     window.clearTimeout(reloadTimer.current)
-    const run = () => load(path, { reset: false, branches: [...next] })
+    const run = () => load(path, { reset: false, restartWindow: true, branches: [...next] })
     if (debounce) reloadTimer.current = window.setTimeout(run, 150)
     else run()
   }

@@ -756,6 +756,49 @@ func TestLoadGraphFeatureKeepsCommitsWhenTrunkAdded(t *testing.T) {
 	}
 }
 
+func TestLoadGraphHiddenMergedSourceUsesFirstParent(t *testing.T) {
+	dir, git := testRepo(t)
+	write(t, dir, "README.md", "a\n")
+	git("add", "README.md")
+	git("commit", "-m", "init")
+	git("checkout", "-b", "feature")
+	write(t, dir, "feat.txt", "ok\n")
+	git("add", "feat.txt")
+	git("commit", "-m", "feat work")
+	git("checkout", "main")
+	git("merge", "--no-ff", "-m", "Merge branch 'feature'", "feature")
+
+	both, err := loadGraph(dir, []string{"main", "feature"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range both.Commits {
+		if c.Subject == "feat work" && c.Branch != "feature" {
+			t.Fatalf("both visible: feat work on %q, want feature", c.Branch)
+		}
+	}
+
+	onlyMain, err := loadGraph(dir, []string{"main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range onlyMain.Commits {
+		if c.Subject == "feat work" {
+			found = true
+			if c.Branch != "main" {
+				t.Fatalf("feature hidden: feat work on %q, want main (next shown parent)", c.Branch)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("feature hidden: missing feat work on main: %+v", subjects(onlyMain))
+	}
+	if contains(onlyMain.Branches, "feature") {
+		t.Fatalf("branches = %v, hidden feature should not keep a lane", onlyMain.Branches)
+	}
+}
+
 func TestListBranches(t *testing.T) {
 	dir, git := testRepo(t)
 	write(t, dir, "README.md", "a\n")

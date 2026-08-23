@@ -63,6 +63,7 @@ type rawCommit struct {
 	branch   string
 	assigned bool
 	on       []string
+	fp       []string
 }
 
 var (
@@ -127,6 +128,7 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 	for _, name := range order {
 		known[laneName(name)] = true
 	}
+	preferParentLanes(commits, known)
 	for _, c := range commits {
 		if !c.assigned || c.branch == "" {
 			continue
@@ -465,6 +467,7 @@ func assignLanes(root string, order []string, tips map[string]string, commits ma
 			if c == nil {
 				continue
 			}
+			markFP(c, lane)
 			markOn(c, lane)
 			if !c.assigned {
 				c.assigned = true
@@ -788,6 +791,75 @@ func pickTrunk(lanes []string) string {
 		}
 	}
 	return ""
+}
+
+func preferParentLanes(commits map[string]*rawCommit, known map[string]bool) {
+	list := make([]*rawCommit, 0, len(commits))
+	for _, c := range commits {
+		if c.assigned {
+			list = append(list, c)
+		}
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if !list[i].at.Equal(list[j].at) {
+			return list[i].at.Before(list[j].at)
+		}
+		return list[i].hash < list[j].hash
+	})
+	for _, c := range list {
+		if b := pickShownLane(c, known, commits); b != "" {
+			c.branch = b
+		}
+	}
+}
+
+func pickShownLane(c *rawCommit, known map[string]bool, commits map[string]*rawCommit) string {
+	if b := pickShownFrom(c, known, commits, c.fp); b != "" {
+		return b
+	}
+	if b := pickShownFrom(c, known, commits, c.on); b != "" {
+		return b
+	}
+	if known[laneName(c.branch)] {
+		return c.branch
+	}
+	return ""
+}
+
+func pickShownFrom(c *rawCommit, known map[string]bool, commits map[string]*rawCommit, lanes []string) string {
+	allow := map[string]bool{}
+	for _, l := range lanes {
+		if known[l] {
+			allow[l] = true
+		}
+	}
+	if len(allow) == 0 {
+		return ""
+	}
+	for _, h := range c.parents {
+		p := commits[h]
+		if p == nil {
+			continue
+		}
+		if allow[laneName(p.branch)] {
+			return p.branch
+		}
+	}
+	for _, l := range lanes {
+		if allow[l] {
+			return l
+		}
+	}
+	return ""
+}
+
+func markFP(c *rawCommit, lane string) {
+	for _, x := range c.fp {
+		if x == lane {
+			return
+		}
+	}
+	c.fp = append(c.fp, lane)
 }
 
 func markOn(c *rawCommit, lane string) {
