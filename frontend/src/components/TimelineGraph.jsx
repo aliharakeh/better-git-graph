@@ -290,20 +290,11 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
 
     const defs = svg.append("defs")
     defs.append("clipPath").attr("id", "net-clip").append("rect").attr("width", width).attr("height", height)
-    defs.append("marker")
-      .attr("id", "net-arrow")
-      .attr("viewBox", "0 0 10 10")
-      .attr("refX", 9)
-      .attr("refY", 5)
-      .attr("markerWidth", 7)
-      .attr("markerHeight", 7)
-      .attr("orient", "auto")
-      .append("path")
-      .attr("d", "M 0 0 L 10 5 L 0 10 z")
-      .attr("fill", "#e2e8f0")
     defs.append("style").text(`
       @keyframes merge-dash { to { stroke-dashoffset: -14; } }
+      @keyframes fork-dash { to { stroke-dashoffset: -24; } }
       .merge-edge { stroke-dasharray: 8 6; animation: merge-dash 0.55s linear infinite; }
+      .fork-edge { stroke-dasharray: 18 6; animation: fork-dash 0.7s linear infinite; }
     `)
 
     svg.append("rect").attr("width", width).attr("height", height).attr("fill", "#0b1220")
@@ -333,7 +324,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       if (s.y == null || d.y == null) return null
       const fork = isStart(e.dst) && e.src.branch !== e.dst.branch
       const r1 = isStart(e.src) ? START_R : e.src.count > 1 ? 11 : 7
-      const r2 = (isStart(e.dst) ? START_R : e.dst.count > 1 ? 11 : 7) + 6
+      const r2 = isStart(e.dst) ? START_R : e.dst.count > 1 ? 11 : 7
       return { e, fork, x1: s.x, y1: s.y, x2: d.x, y2: d.y, r1, r2 }
     }).filter(Boolean)
     const tracks = yTracks(pts)
@@ -346,10 +337,10 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
         ...p.e,
         fork: p.fork,
         merge,
-        d: sameDay && !merge
+        d: p.fork || (sameDay && !merge)
           ? `M ${q.x1} ${q.y1} L ${q.x2} ${q.y2}`
           : edgeCurve(q.x1, q.y1, q.x2, q.y2, 26 + signedTrack(tracks[i]) * 16),
-        stroke: p.fork ? branchColor(p.e.src.branch) : branchColor(p.e.src.branch !== p.e.dst.branch && !p.e.dst.isMerge ? p.e.dst.branch : p.e.src.branch),
+        stroke: p.fork ? branchColor(p.e.dst.branch) : branchColor(p.e.src.branch !== p.e.dst.branch && !p.e.dst.isMerge ? p.e.dst.branch : p.e.src.branch),
         op: !related || p.e.branches.some((b) => related.has(b)) ? 1 : 0.12,
       }
     })
@@ -367,29 +358,11 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       .attr("opacity", (d) => d.op)
     edgeG.append("path")
       .attr("d", (d) => d.d)
-      .attr("class", (d) => (d.merge ? "merge-edge" : null))
+      .attr("class", (d) => (d.fork ? "fork-edge" : d.merge ? "merge-edge" : null))
       .attr("fill", "none")
       .attr("stroke", (d) => d.stroke)
       .attr("stroke-width", (d) => (d.fork ? 3 : 2))
-      .attr("marker-end", (d) => (d.merge ? null : "url(#net-arrow)"))
       .attr("pointer-events", "none")
-    edgeG.filter((d) => d.merge).each(function () {
-      const el = d3.select(this).select("path").node()
-      const len = el.getTotalLength() || 1
-      const at = (t) => {
-        const p = el.getPointAtLength(len * t)
-        const q = el.getPointAtLength(Math.min(len, len * t + 2))
-        return `translate(${p.x},${p.y}) rotate(${Math.atan2(q.y - p.y, q.x - p.x) * (180 / Math.PI)})`
-      }
-      const g = d3.select(this)
-      for (const t of [0.35, 0.7]) {
-        g.append("path")
-          .attr("d", "M -6 -4 L 8 0 L -6 4 Z")
-          .attr("fill", "#e2e8f0")
-          .attr("transform", at(t))
-          .attr("pointer-events", "none")
-      }
-    })
     const isSelected = (d) => d.hash === selectedHash || d.commits?.some((c) => c.hash === selectedHash)
     const matchSet = new Set(matchHashes || [])
     const isHit = (d) => matchSet.has(d.hash) || d.commits?.some((c) => matchSet.has(c.hash))
