@@ -185,7 +185,6 @@ export default function App() {
   const inspect = selected || lastSelected.current
   const [catalog, setCatalog] = useState([])
   const [axisRange, setAxisRange] = useState(null)
-  const [branchSort, setBranchSort] = useState("updated")
   const [visible, setVisible] = useState(() => new Set())
   const [authors, setAuthors] = useState(() => new Set())
   const [kinds, setKinds] = useState(() => new Set(ALL_KINDS))
@@ -415,11 +414,7 @@ export default function App() {
     }
   }
 
-  const rankedBranches = useMemo(() => {
-    const names = lanesByUpdated(catalog)
-    if (branchSort === "alpha") return [...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
-    return names
-  }, [catalog, branchSort])
+  const rankedBranches = useMemo(() => lanesByUpdated(catalog), [catalog])
 
   const branches = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -615,17 +610,7 @@ export default function App() {
           )}
 
           <div className="space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <label className="text-xs font-medium text-muted-foreground">Branches</label>
-              <select
-                value={branchSort}
-                onChange={(e) => setBranchSort(e.target.value)}
-                className="h-7 rounded-md border border-border bg-background px-1.5 text-[11px] text-foreground"
-              >
-                <option value="updated">By updated</option>
-                <option value="alpha">A–Z</option>
-              </select>
-            </div>
+            <label className="text-xs font-medium text-muted-foreground">Branches</label>
             <div className="relative">
               <Search className="pointer-events-none absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
               <Input className="pl-8 pr-8" value={query} placeholder="Search branches…" onChange={(e) => setQuery(e.target.value)} />
@@ -634,10 +619,6 @@ export default function App() {
                   <X className="size-4" />
                 </button>
               )}
-            </div>
-            <div className="flex gap-1">
-              <Button variant="ghost" size="sm" className="h-7 flex-1" onClick={() => applyVisible(new Set(rankedBranches))}>All</Button>
-              <Button variant="ghost" size="sm" className="h-7 flex-1" onClick={() => applyVisible(new Set())}>None</Button>
             </div>
             <div className="max-h-52 space-y-1 overflow-y-auto rounded-md border border-border p-1">
               {branches.length === 0 && <p className="px-2 py-3 text-xs text-muted-foreground">No branches loaded</p>}
