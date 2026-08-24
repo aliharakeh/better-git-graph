@@ -18,6 +18,14 @@ function authorName(c) {
   return c.author || "(unknown)"
 }
 
+function pickShownLane(c, shown) {
+  for (const n of [c.branch, ...(c.lanes || [])]) {
+    const name = laneName(n)
+    if (shown.has(name)) return name
+  }
+  return ""
+}
+
 // A compact, human-readable list of the commits in scope, passed to the AI so
 // it knows which hashes the get_commit_diff tool may be asked about.
 function commitChatContext(inspect) {
@@ -128,10 +136,6 @@ function mergeGraphs(prev, chunk) {
   return { ...prev, branches, commits, merges }
 }
 
-function branchKey(names) {
-  return [...names].sort().join("\n")
-}
-
 function chunkEmpty(chunk) {
   return !(chunk?.commits?.length || chunk?.merges?.length)
 }
@@ -193,13 +197,10 @@ export default function App() {
   const [chatOpen, setChatOpen] = useState(false)
   const [aiInfo, setAiInfo] = useState(null)
   const filterRef = useRef(null)
-  const visibleRef = useRef(visible)
-  visibleRef.current = visible
   const pathRef = useRef(path)
   pathRef.current = path
   const loadSeq = useRef(0)
-  const reloadTimer = useRef(0)
-  const loadedRef = useRef({ from: 0, to: 0, branches: "", pastDone: false, futureDone: false })
+  const loadedRef = useRef({ from: 0, to: 0, pastDone: false, futureDone: false })
   const wantRef = useRef({ from: 0, to: 0 })
   const filling = useRef(false)
   useEffect(() => {
@@ -222,7 +223,7 @@ export default function App() {
     refreshAI()
   }, [])
 
-  async function load(nextPath, { reset = true, branches, restartWindow = false } = {}) {
+  async function load(nextPath, { reset = true } = {}) {
     const target = (nextPath ?? path).trim()
     if (!target) {
       setError("Enter a repository path")
@@ -236,28 +237,24 @@ export default function App() {
       setFocused("")
     }
     try {
-      let selected = branches
       if (reset) {
         const list = await ListBranches(target)
         if (gen !== loadSeq.current) return
         setCatalog(list)
         const names = lanesByUpdated(list)
         const n = Math.min(5, names.length)
-        selected = names.slice(0, n)
         setBranchLimit(n || 1)
-        setVisible(new Set(selected))
+        setVisible(new Set(names.slice(0, n)))
         setMsgQuery("")
         setAuthorQuery("")
         setKinds(new Set(ALL_KINDS))
         setBranchKinds(new Set(ALL_BRANCH_KINDS))
         setShowTags(true)
-      } else if (!selected) {
-        selected = [...visibleRef.current]
       }
       const now = Date.now()
       const initTo = now
       const initFrom = addMonths(now, -CHUNK_MONTHS)
-      const fresh = reset || restartWindow || !loadedRef.current.from
+      const fresh = reset || !loadedRef.current.from
       const from = fresh ? initFrom : loadedRef.current.from
       const to = fresh ? initTo : loadedRef.current.to
       if (fresh) {
@@ -265,9 +262,9 @@ export default function App() {
         wantRef.current = { from: initFrom, to: initTo }
       }
       filling.current = false
-      const data = await LoadRepo(target, selected, iso(from), iso(to))
+      const data = await LoadRepo(target, [], iso(from), iso(to))
       if (gen !== loadSeq.current) return
-      loadedRef.current = { from, to, branches: branchKey(selected), pastDone: false, futureDone: false }
+      loadedRef.current = { from, to, pastDone: false, futureDone: false }
       setGraph(data)
       setPath(data.path || target)
       try {
@@ -297,14 +294,6 @@ export default function App() {
     }
   }
 
-  function applyVisible(next, { debounce = false } = {}) {
-    setVisible(next)
-    window.clearTimeout(reloadTimer.current)
-    const run = () => load(path, { reset: false, restartWindow: true, branches: [...next] })
-    if (debounce) reloadTimer.current = window.setTimeout(run, 150)
-    else run()
-  }
-
   function addAuthors(commits) {
     setAuthors((prev) => {
       const next = new Set(prev)
@@ -315,10 +304,7 @@ export default function App() {
 
   async function ensureRange(viewFrom, viewTo) {
     if (filling.current) return
-    const selected = [...visibleRef.current]
-    const key = branchKey(selected)
     const loaded = loadedRef.current
-    if (loaded.branches && loaded.branches !== key) return
     wantRef.current = { from: viewFrom, to: viewTo }
     const left = monthQueue(loaded, wantRef.current)
     if (viewCovered(loaded, viewFrom, viewTo)) {
@@ -334,13 +320,13 @@ export default function App() {
         const want = wantRef.current
         const queued = monthQueue(cur, want)
         setHistoryLeft(queued)
-        if (cur.branches !== key || viewCovered(cur, want.from, want.to) || !queued) break
+        if (viewCovered(cur, want.from, want.to) || !queued) break
         const target = pathRef.current.trim()
-        if (!target || !selected.length) break
+        if (!target) break
         if (cur.from > want.from && !cur.pastDone) {
           const until = cur.from
           const since = addMonths(until, -CHUNK_MONTHS)
-          const chunk = await LoadRepo(target, selected, iso(since), iso(until))
+          const chunk = await LoadRepo(target, [], iso(since), iso(until))
           if (gen !== loadSeq.current) return
           const empty = chunkEmpty(chunk)
           if (!empty) {
@@ -357,7 +343,7 @@ export default function App() {
             loadedRef.current = { ...loadedRef.current, futureDone: true }
             break
           }
-          const chunk = await LoadRepo(target, selected, iso(since), iso(until))
+          const chunk = await LoadRepo(target, [], iso(since), iso(until))
           if (gen !== loadSeq.current) return
           const empty = chunkEmpty(chunk)
           if (!empty) {
@@ -455,19 +441,23 @@ export default function App() {
     const names = rankedBranches.filter((b) => visible.has(b) && branchKinds.has(branchKind(b)))
     const shown = new Set(names)
     const match = (c, kind) => authors.has(authorName(c)) && kinds.has(kind)
+    const commits = (graph.commits || []).map((c) => {
+      const branch = pickShownLane(c, shown)
+      return branch ? { ...c, branch } : null
+    }).filter((c) => c && match(c, commitKind(c)))
     const merges = (graph.merges || []).map((m) => ({
       ...m,
       sourceBranch: laneName(m.sourceBranch),
       targetBranch: laneName(m.targetBranch),
     })).filter((m) => {
+      if (m.kind === "branch") return shown.has(m.sourceBranch) && shown.has(m.targetBranch)
       if (!(shown.has(m.targetBranch) || shown.has(m.sourceBranch))) return false
-      if (m.kind === "branch") return true
       return match(m, isPrSubject(m.subject) ? "pr" : "merge")
     })
     return {
       ...graph,
       branches: names,
-      commits: (graph.commits || []).map((c) => ({ ...c, branch: laneName(c.branch) })).filter((c) => shown.has(c.branch) && match(c, commitKind(c))),
+      commits,
       merges,
     }
   }, [graph, rankedBranches, visible, authors, kinds, branchKinds])
@@ -504,7 +494,7 @@ export default function App() {
   function showTop(n) {
     const count = Math.min(Math.max(n, 0), rankedBranches.length)
     setBranchLimit(count)
-    applyVisible(new Set(rankedBranches.slice(0, count)), { debounce: true })
+    setVisible(new Set(rankedBranches.slice(0, count)))
   }
 
   function toggleVisible(name) {
@@ -512,7 +502,7 @@ export default function App() {
     if (next.has(name)) next.delete(name)
     else next.add(name)
     setBranchLimit(next.size)
-    applyVisible(next)
+    setVisible(next)
   }
 
   function toggleIn(setter, value) {

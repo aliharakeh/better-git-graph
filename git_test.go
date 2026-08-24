@@ -797,6 +797,22 @@ func TestLoadGraphHiddenMergedSourceUsesFirstParent(t *testing.T) {
 	if contains(onlyMain.Branches, "feature") {
 		t.Fatalf("branches = %v, hidden feature should not keep a lane", onlyMain.Branches)
 	}
+
+	all, err := LoadGraph(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range all.Commits {
+		if c.Subject != "feat work" {
+			continue
+		}
+		if c.Branch != "feature" {
+			t.Fatalf("all-load feat work on %q, want feature", c.Branch)
+		}
+		if !contains(c.Lanes, "feature") || !contains(c.Lanes, "main") {
+			t.Fatalf("feat work lanes = %v, want feature and main", c.Lanes)
+		}
+	}
 }
 
 func TestListBranches(t *testing.T) {

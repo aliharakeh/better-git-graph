@@ -21,6 +21,7 @@ type CommitNode struct {
 	Subject   string   `json:"subject"`
 	IsMerge   bool     `json:"isMerge"`
 	Tags      []string `json:"tags,omitempty"`
+	Lanes     []string `json:"lanes,omitempty"`
 }
 
 type MergeEvent struct {
@@ -158,6 +159,7 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 			Subject:   c.subject,
 			IsMerge:   len(c.parents) > 1,
 			Tags:      tagByHash[c.hash],
+			Lanes:     laneList(c),
 		})
 		if len(c.parents) < 2 {
 			continue
@@ -851,6 +853,19 @@ func pickShownFrom(c *rawCommit, known map[string]bool, commits map[string]*rawC
 		}
 	}
 	return ""
+}
+
+func laneList(c *rawCommit) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range append(append([]string{}, c.fp...), c.on...) {
+		if l == "" || seen[l] {
+			continue
+		}
+		seen[l] = true
+		out = append(out, l)
+	}
+	return out
 }
 
 func markFP(c *rawCommit, lane string) {

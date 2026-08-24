@@ -72,7 +72,7 @@ func (a *App) FetchRemote(path string) error {
 	return fetchRemote(root, info, tokens[info.Host])
 }
 
-func (a *App) LoadRepo(path string, branches []string, since string, until string) (*RepoGraph, error) {
+func (a *App) LoadRepo(path string, _ []string, since string, until string) (*RepoGraph, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, fmt.Errorf("enter a repository path")
@@ -85,10 +85,10 @@ func (a *App) LoadRepo(path string, branches []string, since string, until strin
 	if err != nil {
 		return nil, fmt.Errorf("invalid until: %w", err)
 	}
-	if branches == nil && from.IsZero() && to.IsZero() {
+	if from.IsZero() && to.IsZero() {
 		return LoadGraph(path)
 	}
-	return loadGraphAt(path, branches, from, to)
+	return loadGraphAt(path, nil, from, to)
 }
 
 func parseISO(s string) (time.Time, error) {

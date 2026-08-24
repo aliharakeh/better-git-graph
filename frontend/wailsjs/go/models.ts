@@ -114,6 +114,7 @@ export namespace main {
 	    subject: string;
 	    isMerge: boolean;
 	    tags?: string[];
+	    lanes?: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new CommitNode(source);
@@ -128,6 +129,7 @@ export namespace main {
 	        this.subject = source["subject"];
 	        this.isMerge = source["isMerge"];
 	        this.tags = source["tags"];
+	        this.lanes = source["lanes"];
 	    }
 	}
 	export class MergeEvent {
