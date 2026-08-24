@@ -8,7 +8,7 @@ import { TimelineGraph } from "./components/TimelineGraph";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
-import { wailsError } from "./lib/utils";
+import { branchColor, wailsError } from "./lib/utils";
 
 function laneName(name) {
   return String(name || "").replace(/^refs\/(heads|remotes|tags)\//, "").replace(/^(origin|upstream)\//, "")
@@ -102,7 +102,7 @@ function lanesByUpdated(list) {
   return [...latest.keys()].sort((a, b) => latest.get(b) - latest.get(a))
 }
 
-const CHUNK_MONTHS = 5
+const CHUNK_MONTHS = 3
 
 function addMonths(ms, n) {
   const d = new Date(ms)
@@ -185,7 +185,6 @@ export default function App() {
   const inspect = selected || lastSelected.current
   const [catalog, setCatalog] = useState([])
   const [axisRange, setAxisRange] = useState(null)
-  const [branchLimit, setBranchLimit] = useState(5)
   const [branchSort, setBranchSort] = useState("updated")
   const [visible, setVisible] = useState(() => new Set())
   const [authors, setAuthors] = useState(() => new Set())
@@ -199,8 +198,10 @@ export default function App() {
   const filterRef = useRef(null)
   const pathRef = useRef(path)
   pathRef.current = path
+  const catalogRef = useRef(catalog)
+  catalogRef.current = catalog
   const loadSeq = useRef(0)
-  const loadedRef = useRef({ from: 0, to: 0, pastDone: false, futureDone: false })
+  const loadedRef = useRef({ from: 0, to: 0, branches: "", pastDone: false, futureDone: false })
   const wantRef = useRef({ from: 0, to: 0 })
   const filling = useRef(false)
   useEffect(() => {
@@ -223,7 +224,7 @@ export default function App() {
     refreshAI()
   }, [])
 
-  async function load(nextPath, { reset = true } = {}) {
+  async function load(nextPath, { reset = true, restartWindow = false } = {}) {
     const target = (nextPath ?? path).trim()
     if (!target) {
       setError("Enter a repository path")
@@ -237,19 +238,21 @@ export default function App() {
       setFocused("")
     }
     try {
+      let selected
       if (reset) {
         const list = await ListBranches(target)
         if (gen !== loadSeq.current) return
         setCatalog(list)
-        const names = lanesByUpdated(list)
-        const n = Math.min(5, names.length)
-        setBranchLimit(n || 1)
-        setVisible(new Set(names.slice(0, n)))
+        catalogRef.current = list
+        selected = lanesByUpdated(list)
+        setVisible(new Set(selected.slice(0, 10)))
         setMsgQuery("")
         setAuthorQuery("")
         setKinds(new Set(ALL_KINDS))
         setBranchKinds(new Set(ALL_BRANCH_KINDS))
         setShowTags(true)
+      } else {
+        selected = lanesByUpdated(catalogRef.current)
       }
       const now = Date.now()
       const initTo = now
@@ -294,6 +297,10 @@ export default function App() {
     }
   }
 
+  function applyVisible(next) {
+    setVisible(next)
+  }
+
   function addAuthors(commits) {
     setAuthors((prev) => {
       const next = new Set(prev)
@@ -334,6 +341,7 @@ export default function App() {
             addAuthors(chunk?.commits)
           }
           loadedRef.current = { ...loadedRef.current, from: since, pastDone: empty }
+          setAxisRange([since, loadedRef.current.to])
           continue
         }
         if (cur.to < want.to && !cur.futureDone) {
@@ -351,6 +359,7 @@ export default function App() {
             addAuthors(chunk?.commits)
           }
           loadedRef.current = { ...loadedRef.current, to: until, futureDone: empty }
+          setAxisRange([loadedRef.current.from, until])
           continue
         }
         break
@@ -450,14 +459,24 @@ export default function App() {
       sourceBranch: laneName(m.sourceBranch),
       targetBranch: laneName(m.targetBranch),
     })).filter((m) => {
-      if (m.kind === "branch") return shown.has(m.sourceBranch) && shown.has(m.targetBranch)
+      const hidden = (n) => rankedBranches.includes(n) && !shown.has(n)
+      if (hidden(m.targetBranch) || hidden(m.sourceBranch)) return false
       if (!(shown.has(m.targetBranch) || shown.has(m.sourceBranch))) return false
       return match(m, isPrSubject(m.subject) ? "pr" : "merge")
     })
+    const srcByHash = new Map()
+    for (const m of merges) {
+      if (m.sourceBranch && !srcByHash.has(m.hash)) srcByHash.set(m.hash, m.sourceBranch)
+    }
     return {
       ...graph,
       branches: names,
-      commits,
+      commits: (graph.commits || []).map((c) => ({
+        ...c,
+        branch: laneName(c.branch),
+        on: (c.on || [c.branch]).map(laneName),
+        sourceBranch: c.isMerge ? srcByHash.get(c.hash) : undefined,
+      })).filter((c) => shown.has(c.branch) && match(c, commitKind(c))),
       merges,
     }
   }, [graph, rankedBranches, visible, authors, kinds, branchKinds])
@@ -491,18 +510,11 @@ export default function App() {
     setJumpTo({ hash: c.hash, n: (jumpTo?.n || 0) + 1 })
   }
 
-  function showTop(n) {
-    const count = Math.min(Math.max(n, 0), rankedBranches.length)
-    setBranchLimit(count)
-    setVisible(new Set(rankedBranches.slice(0, count)))
-  }
-
   function toggleVisible(name) {
     const next = new Set(visible)
     if (next.has(name)) next.delete(name)
     else next.add(name)
-    setBranchLimit(next.size)
-    setVisible(next)
+    applyVisible(next)
   }
 
   function toggleIn(setter, value) {
@@ -519,7 +531,7 @@ export default function App() {
       <header className="drag flex h-11 items-center border-b border-border px-4">
         <GitMerge className="mr-2 size-4 text-primary" />
         <span className="text-sm font-semibold">Git Merge Timeline</span>
-        <span className="ml-2 text-xs text-muted-foreground">Network history of branch merges</span>
+        <span className="ml-2 text-xs text-muted-foreground">Commit network by day</span>
         <div className="no-drag ml-auto flex items-center">
           <Button
             variant="ghost"
@@ -602,47 +614,9 @@ export default function App() {
             </div>
           )}
 
-          {rankedBranches.length > 0 && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="text-xs font-medium text-muted-foreground">Visible branches</label>
-                <span className="font-mono text-[11px] text-muted-foreground">
-                  {visible.size} / {rankedBranches.length}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <input
-                  type="range"
-                  min={0}
-                  max={rankedBranches.length}
-                  value={Math.min(branchLimit, rankedBranches.length)}
-                  onChange={(e) => showTop(Number(e.target.value))}
-                  className="h-2 w-full accent-primary"
-                  title="Show top N by current sort"
-                />
-                <Input
-                  type="number"
-                  min={0}
-                  max={rankedBranches.length}
-                  value={Math.min(branchLimit, rankedBranches.length)}
-                  onChange={(e) => showTop(Number(e.target.value) || 0)}
-                  className="h-8 w-16 px-2 text-center"
-                />
-              </div>
-              <div className="flex gap-1">
-                <Button variant="ghost" size="sm" className="h-7 flex-1" onClick={() => showTop(rankedBranches.length)}>
-                  All
-                </Button>
-                <Button variant="ghost" size="sm" className="h-7 flex-1" onClick={() => showTop(0)}>
-                  None
-                </Button>
-              </div>
-            </div>
-          )}
-
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-2">
-              <label className="text-xs font-medium text-muted-foreground">Branch highlight</label>
+              <label className="text-xs font-medium text-muted-foreground">Branches</label>
               <select
                 value={branchSort}
                 onChange={(e) => setBranchSort(e.target.value)}
@@ -661,6 +635,10 @@ export default function App() {
                 </button>
               )}
             </div>
+            <div className="flex gap-1">
+              <Button variant="ghost" size="sm" className="h-7 flex-1" onClick={() => applyVisible(new Set(rankedBranches))}>All</Button>
+              <Button variant="ghost" size="sm" className="h-7 flex-1" onClick={() => applyVisible(new Set())}>None</Button>
+            </div>
             <div className="max-h-52 space-y-1 overflow-y-auto rounded-md border border-border p-1">
               {branches.length === 0 && <p className="px-2 py-3 text-xs text-muted-foreground">No branches loaded</p>}
               {branches.map((name) => (
@@ -677,6 +655,7 @@ export default function App() {
                     className="size-3.5 shrink-0 accent-primary"
                     title={visible.has(name) ? "Hide branch" : "Show branch"}
                   />
+                  <span className="size-2 shrink-0 rounded-full" style={{ background: branchColor(name) }} />
                   <button
                     onClick={() => setFocused(highlight === name ? "" : name)}
                     className="flex min-w-0 flex-1 items-center justify-between text-left"
@@ -735,8 +714,8 @@ export default function App() {
           <div className="flex items-center gap-3 border-b border-border px-4 py-2">
             <div className="flex min-w-0 items-end gap-2">
               <div className="min-w-0 shrink">
-                <div className="text-sm font-medium">Network timeline</div>
-                <div className="truncate text-[11px] text-muted-foreground">Scroll to zoom · drag to pan · double-click to reset</div>
+                <div className="text-sm font-medium">Commit network</div>
+                <div className="truncate text-[11px] text-muted-foreground">Equal day columns · pan past an end to load more · scroll to zoom · double-click to reset</div>
               </div>
               {historyLeft > 0 && (
                 <Badge className="mb-px shrink-0 gap-1.5 border-amber-400 bg-amber-400 text-slate-950">
@@ -830,7 +809,7 @@ export default function App() {
                   </div>
                 </details>
                 <div className="flex gap-2 tabular-nums">
-                  <Badge variant="outline" className="w-[7.5rem] justify-center">{visibleGraph.branches.length}/{rankedBranches.length} branches</Badge>
+                  <Badge variant="outline" className="w-[7.5rem] justify-center">{visibleGraph.branches.length} branches</Badge>
                   <Badge variant="outline" className="w-[6.25rem] justify-center">{visibleGraph.merges.length} merges</Badge>
                   <Badge variant="outline" className="w-[6.75rem] justify-center">{visibleGraph.commits.length} commits</Badge>
                 </div>
@@ -842,7 +821,7 @@ export default function App() {
             {!graph ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
                 <GitMerge className="size-10 opacity-40" />
-                <p className="text-sm">Open a git repository to plot merge flow across branch swimlanes.</p>
+                <p className="text-sm">Open a git repository to plot the last 3 months as a commit network.</p>
               </div>
             ) : (
               <TimelineGraph
@@ -852,10 +831,10 @@ export default function App() {
                 matchHashes={matchHashes}
                 jumpTo={msgQuery.trim() ? jumpTo : null}
                 onSelect={setSelected}
+                showTags={showTags}
                 rangeStart={axisRange?.[0]}
                 rangeEnd={axisRange?.[1]}
                 onViewChange={onViewChange}
-                showTags={showTags}
               />
             )}
           </div>
@@ -892,7 +871,7 @@ export default function App() {
               {inspect.kind === "merge" ? (
                 <dl className="space-y-2 text-xs">
                   <Row label="Merge commit" value={inspect.hash} mono action={<CommitLink prefix={graph?.commitUrl} hash={inspect.hash} />} />
-                  <Row label="Message" value={<span className="text-cyan-300">{inspect.subject || "—"}</span>} />
+                  <Row label="Message" value={<span className="font-medium" style={{ color: branchColor(inspect.sourceBranch) }}>{inspect.subject || "—"}</span>} />
                   {inspect.tags?.length ? <Row label="Tags" value={inspect.tags.join(" · ")} /> : null}
                   <Row label="Source branch" value={inspect.sourceBranch} />
                   <Row label="Target branch" value={inspect.targetBranch} />
@@ -913,9 +892,9 @@ export default function App() {
                           <AuthorChip name={authorName(c)} />
                           <CommitLink prefix={graph?.commitUrl} hash={c.hash} />
                         </div>
-                        <dd className={`min-w-0 break-words font-medium ${c.isMerge ? "text-cyan-300" : ""}`}>
+                        <dd className="min-w-0 break-words font-medium" style={c.isMerge ? { color: branchColor(c.sourceBranch) } : undefined}>
                           {c.subject || c.hash}
-                          {c.isMerge ? <span className="ml-1 text-cyan-300/70">merge</span> : null}
+                          {c.isMerge ? <span className="ml-1 opacity-70">merge</span> : null}
                           {c.tags?.length ? <span className="ml-1 text-amber-400">{c.tags.join(" · ")}</span> : null}
                         </dd>
                       </div>
@@ -925,7 +904,7 @@ export default function App() {
               ) : (
                 <dl className="space-y-2 text-xs">
                   <Row label="Commit" value={inspect.hash} mono action={<CommitLink prefix={graph?.commitUrl} hash={inspect.hash} />} />
-                  <Row label="Message" value={inspect.isMerge ? <span className="text-cyan-300">{inspect.subject || "—"}</span> : (inspect.subject || "—")} />
+                  <Row label="Message" value={inspect.isMerge ? <span className="font-medium" style={{ color: branchColor(inspect.sourceBranch) }}>{inspect.subject || "—"}</span> : (inspect.subject || "—")} />
                   <Row label="Branch" value={inspect.branch} />
                   {inspect.tags?.length ? <Row label="Tags" value={inspect.tags.join(" · ")} /> : null}
                   <Row label="Timestamp" value={<TimeChip ts={inspect.timestamp} withDate />} />

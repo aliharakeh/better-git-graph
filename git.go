@@ -16,6 +16,8 @@ import (
 type CommitNode struct {
 	Hash      string   `json:"hash"`
 	Branch    string   `json:"branch"`
+	On        []string `json:"on,omitempty"`
+	Parents   []string `json:"parents,omitempty"`
 	Timestamp string   `json:"timestamp"`
 	Author    string   `json:"author"`
 	Subject   string   `json:"subject"`
@@ -154,6 +156,8 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 		nodes = append(nodes, CommitNode{
 			Hash:      c.hash,
 			Branch:    branch,
+			On:        c.on,
+			Parents:   c.parents,
 			Timestamp: iso,
 			Author:    c.author,
 			Subject:   c.subject,

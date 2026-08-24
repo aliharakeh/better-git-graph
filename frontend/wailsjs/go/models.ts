@@ -109,6 +109,8 @@ export namespace main {
 	export class CommitNode {
 	    hash: string;
 	    branch: string;
+	    on?: string[];
+	    parents?: string[];
 	    timestamp: string;
 	    author: string;
 	    subject: string;
@@ -124,6 +126,8 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.hash = source["hash"];
 	        this.branch = source["branch"];
+	        this.on = source["on"];
+	        this.parents = source["parents"];
 	        this.timestamp = source["timestamp"];
 	        this.author = source["author"];
 	        this.subject = source["subject"];

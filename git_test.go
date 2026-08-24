@@ -121,6 +121,16 @@ func TestLoadGraphMerge(t *testing.T) {
 	if _, err := time.Parse(time.RFC3339, m.Timestamp); err != nil {
 		t.Fatal(err)
 	}
+	hasParent := false
+	for _, c := range g.Commits {
+		if len(c.Parents) > 0 {
+			hasParent = true
+			break
+		}
+	}
+	if !hasParent {
+		t.Fatal("expected parent hashes on commits")
+	}
 }
 
 func TestLoadGraphBranchStart(t *testing.T) {
