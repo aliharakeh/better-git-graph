@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, CloudDownload, ExternalLink, Filter, FolderOpen, GitBranch, GitMerge, Loader2, RefreshCw, Search, Sparkles, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, CloudDownload, ExternalLink, FolderOpen, GitBranch, GitMerge, Loader2, Search, Sparkles, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FetchRemote, GetAIConfig, GetRemote, ListBranches, LoadRepo, SaveRemoteToken, SelectRepo } from "../wailsjs/go/main/App";
 import { BrowserOpenURL } from "../wailsjs/runtime/runtime";
@@ -18,14 +18,6 @@ function authorName(c) {
   return c.author || "(unknown)"
 }
 
-function pickShownLane(c, shown) {
-  for (const n of [c.branch, ...(c.lanes || [])]) {
-    const name = laneName(n)
-    if (shown.has(name)) return name
-  }
-  return ""
-}
-
 // A compact, human-readable list of the commits in scope, passed to the AI so
 // it knows which hashes the get_commit_diff tool may be asked about.
 function commitChatContext(inspect) {
@@ -37,40 +29,6 @@ function commitChatContext(inspect) {
       return `- ${meta}${merge} — ${c.subject || ""}${c.tags?.length ? ` (${c.tags.join(", ")})` : ""}`
     })
     .join("\n")
-}
-
-function isPrSubject(subject) {
-  const s = String(subject || "")
-  return /^Merge pull request #\d+/i.test(s) || /^Merged in \S+ \(pull request #\d+\)/i.test(s)
-}
-
-function commitKind(c) {
-  if (!c.isMerge) return "normal"
-  return isPrSubject(c.subject) ? "pr" : "merge"
-}
-
-const KIND_OPTS = [
-  { id: "pr", label: "PR" },
-  { id: "merge", label: "Merge" },
-  { id: "normal", label: "Normal" },
-]
-
-const BRANCH_OPTS = [
-  { id: "feature", label: "Feature" },
-  { id: "hotfix", label: "Hotfix" },
-  { id: "epic", label: "Epic" },
-  { id: "others", label: "Others" },
-]
-
-const ALL_KINDS = KIND_OPTS.map((k) => k.id)
-const ALL_BRANCH_KINDS = BRANCH_OPTS.map((k) => k.id)
-
-function branchKind(name) {
-  const n = laneName(name).toLowerCase()
-  if (/^(feature|feat)([/-]|$)/.test(n)) return "feature"
-  if (/^hotfix([/-]|$)/.test(n)) return "hotfix"
-  if (/^epic([/-]|$)/.test(n)) return "epic"
-  return "others"
 }
 
 function fmt(ts) {
@@ -177,6 +135,7 @@ export default function App() {
   const [msgQuery, setMsgQuery] = useState("")
   const [hitIndex, setHitIndex] = useState(-1)
   const [jumpTo, setJumpTo] = useState(null)
+  const [fitKey, setFitKey] = useState(0)
   const [authorQuery, setAuthorQuery] = useState("")
   const [focused, setFocused] = useState("")
   const [selected, setSelected] = useState(null)
@@ -187,30 +146,16 @@ export default function App() {
   const [axisRange, setAxisRange] = useState(null)
   const [visible, setVisible] = useState(() => new Set())
   const [authors, setAuthors] = useState(() => new Set())
-  const [kinds, setKinds] = useState(() => new Set(ALL_KINDS))
-  const [branchKinds, setBranchKinds] = useState(() => new Set(ALL_BRANCH_KINDS))
-  const [showTags, setShowTags] = useState(true)
   const [historyLeft, setHistoryLeft] = useState(0)
   const [aiOpen, setAiOpen] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
   const [aiInfo, setAiInfo] = useState(null)
-  const filterRef = useRef(null)
   const pathRef = useRef(path)
   pathRef.current = path
-  const catalogRef = useRef(catalog)
-  catalogRef.current = catalog
   const loadSeq = useRef(0)
   const loadedRef = useRef({ from: 0, to: 0, branches: "", pastDone: false, futureDone: false })
   const wantRef = useRef({ from: 0, to: 0 })
   const filling = useRef(false)
-  useEffect(() => {
-    const close = (e) => {
-      if (filterRef.current && !filterRef.current.contains(e.target)) filterRef.current.open = false
-    }
-    document.addEventListener("pointerdown", close)
-    return () => document.removeEventListener("pointerdown", close)
-  }, [])
-
   async function refreshAI() {
     try {
       setAiInfo(await GetAIConfig())
@@ -223,7 +168,7 @@ export default function App() {
     refreshAI()
   }, [])
 
-  async function load(nextPath, { reset = true, restartWindow = false } = {}) {
+  async function load(nextPath) {
     const target = (nextPath ?? path).trim()
     if (!target) {
       setError("Enter a repository path")
@@ -232,64 +177,38 @@ export default function App() {
     const gen = ++loadSeq.current
     setLoading(true)
     setError("")
-    if (reset) {
-      setSelected(null)
-      setFocused("")
-    }
+    setSelected(null)
+    setFocused("")
     try {
-      let selected
-      if (reset) {
-        const list = await ListBranches(target)
-        if (gen !== loadSeq.current) return
-        setCatalog(list)
-        catalogRef.current = list
-        selected = lanesByUpdated(list)
-        setVisible(new Set(selected.slice(0, 10)))
-        setMsgQuery("")
-        setAuthorQuery("")
-        setKinds(new Set(ALL_KINDS))
-        setBranchKinds(new Set(ALL_BRANCH_KINDS))
-        setShowTags(true)
-      } else {
-        selected = lanesByUpdated(catalogRef.current)
-      }
+      const list = await ListBranches(target)
+      if (gen !== loadSeq.current) return
+      setCatalog(list)
+      setVisible(new Set(lanesByUpdated(list).slice(0, 10)))
+      setMsgQuery("")
+      setAuthorQuery("")
       const now = Date.now()
-      const initTo = now
-      const initFrom = addMonths(now, -CHUNK_MONTHS)
-      const fresh = reset || !loadedRef.current.from
-      const from = fresh ? initFrom : loadedRef.current.from
-      const to = fresh ? initTo : loadedRef.current.to
-      if (fresh) {
-        setAxisRange([initFrom, initTo])
-        wantRef.current = { from: initFrom, to: initTo }
-      }
+      const from = addMonths(now, -CHUNK_MONTHS)
+      const to = now
+      setAxisRange([from, to])
+      wantRef.current = { from, to }
       filling.current = false
       const data = await LoadRepo(target, [], iso(from), iso(to))
       if (gen !== loadSeq.current) return
       loadedRef.current = { from, to, pastDone: false, futureDone: false }
       setGraph(data)
+      setFitKey((n) => n + 1)
       setPath(data.path || target)
       try {
         setRemote(await GetRemote(data.path || target))
       } catch {
         setRemote(null)
       }
-      if (reset) {
-        setAuthors(new Set((data.commits || []).map(authorName)))
-      } else {
-        setAuthors((prev) => {
-          const next = new Set(prev)
-          for (const c of data.commits || []) next.add(authorName(c))
-          return next
-        })
-      }
+      setAuthors(new Set((data.commits || []).map(authorName)))
     } catch (err) {
       if (gen !== loadSeq.current) return
-      if (reset) {
-        setGraph(null)
-        setCatalog([])
-        setRemote(null)
-      }
+      setGraph(null)
+      setCatalog([])
+      setRemote(null)
       setError(wailsError(err))
     } finally {
       if (gen === loadSeq.current) setLoading(false)
@@ -442,13 +361,8 @@ export default function App() {
 
   const visibleGraph = useMemo(() => {
     if (!graph) return null
-    const names = rankedBranches.filter((b) => visible.has(b) && branchKinds.has(branchKind(b)))
+    const names = rankedBranches.filter((b) => visible.has(b))
     const shown = new Set(names)
-    const match = (c, kind) => authors.has(authorName(c)) && kinds.has(kind)
-    const commits = (graph.commits || []).map((c) => {
-      const branch = pickShownLane(c, shown)
-      return branch ? { ...c, branch } : null
-    }).filter((c) => c && match(c, commitKind(c)))
     const merges = (graph.merges || []).map((m) => ({
       ...m,
       sourceBranch: laneName(m.sourceBranch),
@@ -457,7 +371,7 @@ export default function App() {
       const hidden = (n) => rankedBranches.includes(n) && !shown.has(n)
       if (hidden(m.targetBranch) || hidden(m.sourceBranch)) return false
       if (!(shown.has(m.targetBranch) || shown.has(m.sourceBranch))) return false
-      return match(m, isPrSubject(m.subject) ? "pr" : "merge")
+      return true
     })
     const srcByHash = new Map()
     for (const m of merges) {
@@ -471,10 +385,10 @@ export default function App() {
         branch: laneName(c.branch),
         on: (c.on || [c.branch]).map(laneName),
         sourceBranch: c.isMerge ? srcByHash.get(c.hash) : undefined,
-      })).filter((c) => shown.has(c.branch) && match(c, commitKind(c))),
+      })).filter((c) => shown.has(c.branch)),
       merges,
     }
-  }, [graph, rankedBranches, visible, authors, kinds, branchKinds])
+  }, [graph, rankedBranches, visible])
 
   const searchHits = useMemo(() => {
     const msg = msgQuery.trim().toLowerCase()
@@ -707,9 +621,6 @@ export default function App() {
             </div>
             {graph && (
               <div className="ml-auto flex shrink-0 items-center gap-3">
-                <Button variant="outline" size="icon" className="size-8" onClick={() => load(path, { reset: false })} disabled={loading} title="Refresh graph">
-                  <RefreshCw className={loading ? "animate-spin" : ""} />
-                </Button>
                 <div className="flex items-center gap-1">
                   <div className="relative w-52">
                     <Search className="pointer-events-none absolute left-2.5 top-2 size-4 text-muted-foreground" />
@@ -748,47 +659,6 @@ export default function App() {
                     </>
                   ) : null}
                 </div>
-                <details ref={filterRef} className="relative">
-                  <summary className="inline-flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-border bg-transparent px-3 text-xs font-medium hover:bg-muted [&::-webkit-details-marker]:hidden">
-                    <Filter className="size-4" />
-                    Filters
-                    <span className="tabular-nums text-muted-foreground">{kinds.size + branchKinds.size + (showTags ? 1 : 0)}/{ALL_KINDS.length + ALL_BRANCH_KINDS.length + 1}</span>
-                  </summary>
-                  <div className="absolute right-0 z-20 mt-1 w-40 rounded-md border border-border bg-card p-1 shadow-lg">
-                    {KIND_OPTS.map((k) => (
-                      <label key={k.id} className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted">
-                        <input
-                          type="checkbox"
-                          checked={kinds.has(k.id)}
-                          onChange={() => toggleIn(setKinds, k.id)}
-                          className="size-3.5 shrink-0 accent-primary"
-                        />
-                        {k.label}
-                      </label>
-                    ))}
-                    <label className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted">
-                      <input
-                        type="checkbox"
-                        checked={showTags}
-                        onChange={() => setShowTags((v) => !v)}
-                        className="size-3.5 shrink-0 accent-primary"
-                      />
-                      Tagged
-                    </label>
-                    <div className="my-1 border-t border-border" />
-                    {BRANCH_OPTS.map((k) => (
-                      <label key={k.id} className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted">
-                        <input
-                          type="checkbox"
-                          checked={branchKinds.has(k.id)}
-                          onChange={() => toggleIn(setBranchKinds, k.id)}
-                          className="size-3.5 shrink-0 accent-primary"
-                        />
-                        {k.label}
-                      </label>
-                    ))}
-                  </div>
-                </details>
                 <div className="flex gap-2 tabular-nums">
                   <Badge variant="outline" className="w-[7.5rem] justify-center">{visibleGraph.branches.length} branches</Badge>
                   <Badge variant="outline" className="w-[6.25rem] justify-center">{visibleGraph.merges.length} merges</Badge>
@@ -808,14 +678,16 @@ export default function App() {
               <TimelineGraph
                 graph={visibleGraph}
                 focused={highlight}
+                selectedAuthors={authors.size < authorList.length ? authors : null}
                 selectedHash={selected?.hash}
                 matchHashes={matchHashes}
                 jumpTo={msgQuery.trim() ? jumpTo : null}
                 onSelect={setSelected}
-                showTags={showTags}
+                showTags
                 rangeStart={axisRange?.[0]}
                 rangeEnd={axisRange?.[1]}
                 onViewChange={onViewChange}
+                fitKey={fitKey}
               />
             )}
           </div>

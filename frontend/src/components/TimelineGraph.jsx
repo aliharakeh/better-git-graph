@@ -7,6 +7,11 @@ const COL_W = 148
 const START_R = 18
 const MARGIN = { top: 48, right: 56, bottom: 36, left: 36 }
 
+function viewAt(width, height, x, y) {
+  const ty = y > height - LANE_H ? height / 2 - y : 0
+  return d3.zoomIdentity.translate(width - MARGIN.right - x, ty)
+}
+
 function laneName(name) {
   return String(name || "").replace(/^refs\/(heads|remotes|tags)\//, "").replace(/^(origin|upstream)\//, "")
 }
@@ -171,10 +176,6 @@ function buildEdges(clusters, commits, branches, merges) {
       linked = true
       const names = (c.on || [c.branch]).filter((n) => allow.has(n))
       if (!names.length) continue
-      if (c.isMerge && i === 0 && src.branch !== dst.branch) {
-        addEdge(edges, src, dst, names, { hash: c.hash, subject: `Branch from ${src.branch}`, branch: dst.branch })
-        continue
-      }
       addEdge(edges, src, dst, names, c)
     }
   }
@@ -197,7 +198,7 @@ function buildEdges(clusters, commits, branches, merges) {
   return [...edges.values()].map((e) => ({ ...e, branches: [...e.branches].sort() }))
 }
 
-export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHashes, jumpTo, showTags, rangeStart, rangeEnd, onViewChange }) {
+export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHashes, selectedAuthors, jumpTo, showTags, rangeStart, rangeEnd, onViewChange, fitKey }) {
   const wrapRef = useRef(null)
   const svgRef = useRef(null)
   const zoomRef = useRef(d3.zoomIdentity)
@@ -208,7 +209,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
   viewCb.current = onViewChange
   const rangeRef = useRef({ start: rangeStart, end: rangeEnd })
   rangeRef.current = { start: rangeStart, end: rangeEnd }
-  const [size, setSize] = useState({ w: 900, h: 480 })
+  const [size, setSize] = useState({ w: 0, h: 0 })
   const [tip, setTip] = useState(null)
 
   useEffect(() => {
@@ -239,7 +240,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     const svgEl = svgRef.current
     const svg = d3.select(svgEl)
     svg.selectAll("*").remove()
-    if (!graph?.branches?.length) return
+    if (!graph?.branches?.length || size.w < 80 || size.h < 80) return
 
     const branches = [...new Set(graph.branches.map(laneName))]
     const commits = graph.commits.map((c) => ({ ...c, branch: laneName(c.branch), on: (c.on || [c.branch]).map(laneName) })).filter((c) => branches.includes(c.branch))
@@ -247,6 +248,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     const clusters = [...clusterMap.values()]
     const merges = (graph.merges || []).map((m) => ({ ...m, sourceBranch: laneName(m.sourceBranch), targetBranch: laneName(m.targetBranch) }))
     for (const m of merges) {
+      if (m.kind === "branch") continue
       (clusterMap.get(clusterKey(m.targetBranch, m.timestamp)) || clusterMap.get(clusterKey(m.sourceBranch, m.timestamp)))?.merges.push(m)
     }
     const edges = buildEdges(clusters, commits, branches, merges)
@@ -271,11 +273,19 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     const xOf = (ts) => MARGIN.left + (dayIndex.get(localDay(ts)) ?? 0) * COL_W
     const plotBottom = MARGIN.top + Math.max(branches.length, 1) * LANE_H
     const dim = (branch) => (related && !related.has(branch) ? 0.12 : 1)
+    const firstX = MARGIN.left
+    const lastX = MARGIN.left + Math.max(days.length - 1, 0) * COL_W
+    let latest = clusters[0]
+    for (const g of clusters) {
+      if (+new Date(g.timestamp) > +new Date(latest.timestamp)) latest = g
+    }
+    const latestView = latest
+      ? viewAt(width, height, xOf(latest.timestamp), yOf(latest.branch) ?? height / 2)
+      : d3.zoomIdentity
 
-    const graphKey = graph.path || ""
-    if (zoomKeyRef.current !== graphKey) {
-      zoomRef.current = d3.zoomIdentity
-      zoomKeyRef.current = graphKey
+    if (zoomKeyRef.current !== fitKey) {
+      zoomRef.current = latestView
+      zoomKeyRef.current = fitKey
       anchorRef.current = null
     } else if (anchorRef.current) {
       const { key, k, y, sx } = anchorRef.current
@@ -341,7 +351,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
           ? `M ${q.x1} ${q.y1} L ${q.x2} ${q.y2}`
           : edgeCurve(q.x1, q.y1, q.x2, q.y2, 26 + signedTrack(tracks[i]) * 16),
         stroke: p.fork ? branchColor(p.e.dst.branch) : branchColor(p.e.src.branch !== p.e.dst.branch && !p.e.dst.isMerge ? p.e.dst.branch : p.e.src.branch),
-        op: !related || p.e.branches.some((b) => related.has(b)) ? 1 : 0.12,
+        op: (!related || p.e.branches.some((b) => related.has(b))) && (!selectedAuthors || p.e.commits?.some((c) => selectedAuthors.has(c.author || "(unknown)"))) ? 1 : 0.12,
       }
     })
 
@@ -365,19 +375,22 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       .attr("pointer-events", "none")
     const isSelected = (d) => d.hash === selectedHash || d.commits?.some((c) => c.hash === selectedHash)
     const matchSet = new Set(matchHashes || [])
-    const isHit = (d) => matchSet.has(d.hash) || d.commits?.some((c) => matchSet.has(c.hash))
+    const isSearchHit = (d) => matchSet.has(d.hash) || d.commits?.some((c) => matchSet.has(c.hash))
+    const isAuthorHit = (d) => !selectedAuthors || selectedAuthors.has(d.author || "(unknown)") || d.commits?.some((c) => selectedAuthors.has(c.author || "(unknown)"))
+    const isHit = (d) => (!matchSet.size || isSearchHit(d)) && isAuthorHit(d)
+    const filterOn = matchSet.size || selectedAuthors
     const innerR = (d) => (d.count > 1 ? 9 : 5) + (isSelected(d) ? 2 : 0)
 
     const commitDots = world.append("g").selectAll("g").data(clusters).join("g")
       .attr("transform", (d) => `translate(${xOf(d.timestamp)},${yOf(d.branch)})`)
-      .attr("opacity", (d) => (matchSet.size && !isHit(d) ? 0.2 : 0.9) * dim(d.branch))
+      .attr("opacity", (d) => (filterOn && !isHit(d) ? 0.2 : 0.9) * dim(d.branch))
       .style("cursor", "pointer")
       .on("pointerenter", (event, d) => showTip(event, d))
       .on("pointermove", moveTip)
       .on("pointerleave", () => setTip(null))
       .on("click", (event, d) => {
         event.stopPropagation()
-        if (d.count === 1 && d.merges?.length === 1) {
+        if (d.count === 1 && d.merges?.length === 1 && d.merges[0].kind !== "branch") {
           onSelect({ kind: "merge", ...d.merges[0], tags: d.tags })
           return
         }
@@ -385,7 +398,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       })
       .on("dblclick", (event) => event.stopPropagation())
     commitDots.append("circle").attr("r", (d) => (isStart(d) ? START_R + 6 : 14)).attr("fill", "transparent")
-    commitDots.filter((d) => matchSet.size && isHit(d)).append("circle")
+    commitDots.filter((d) => filterOn && isHit(d)).append("circle")
       .attr("r", (d) => (isStart(d) ? START_R : innerR(d)) + 7)
       .attr("fill", "none")
       .attr("stroke", "#fbbf24")
@@ -436,8 +449,6 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       .attr("pointer-events", "none")
       .text((d) => clipLabel(d.branch, 32))
 
-    const firstX = MARGIN.left
-    const lastX = MARGIN.left + Math.max(days.length - 1, 0) * COL_W
     const oldest = rangeRef.current.start ?? days[0]?.[1]?.t
     const newest = rangeRef.current.end ?? days[days.length - 1]?.[1]?.t
     function reportView(t) {
@@ -474,8 +485,8 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     svg.call(zoom)
     svg.on("dblclick.zoom", null)
     svg.on("dblclick", () => {
-      zoomRef.current = d3.zoomIdentity
-      svg.transition().duration(200).call(zoom.transform, d3.zoomIdentity)
+      zoomRef.current = latestView
+      svg.transition().duration(200).call(zoom.transform, latestView)
     })
     const jumpKey = jumpTo?.hash ? `${jumpTo.hash}:${jumpTo.n}` : ""
     if (!jumpKey) jumpKeyRef.current = ""
@@ -494,7 +505,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     return () => {
       d3.select(svgEl).on(".zoom", null).on("dblclick", null)
     }
-  }, [graph, related, size, selectedHash, matchHashes, jumpTo, onSelect, showTags])
+  }, [graph, related, size, selectedHash, matchHashes, selectedAuthors, jumpTo, onSelect, showTags, fitKey])
 
   const branches = graph?.branches || []
 
