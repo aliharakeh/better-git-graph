@@ -136,6 +136,7 @@ export default function App() {
   const [hitIndex, setHitIndex] = useState(-1)
   const [jumpTo, setJumpTo] = useState(null)
   const [fitKey, setFitKey] = useState(0)
+  const [colW, setColW] = useState(200)
   const [authorQuery, setAuthorQuery] = useState("")
   const [focused, setFocused] = useState("")
   const [selected, setSelected] = useState(null)
@@ -621,6 +622,30 @@ export default function App() {
             </div>
             {graph && (
               <div className="ml-auto flex shrink-0 items-center gap-3">
+                <div className="flex items-center gap-2" title="Day column spacing (x-axis gap)">
+                  <span className="text-[11px] text-muted-foreground">X-gap</span>
+                  <input
+                    type="range"
+                    min={100}
+                    max={320}
+                    step={4}
+                    value={colW}
+                    onChange={(e) => setColW(Number(e.target.value))}
+                    className="w-24 accent-primary"
+                  />
+                  <Input
+                    className="h-8 w-16 px-2 text-xs tabular-nums"
+                    type="number"
+                    min={60}
+                    max={400}
+                    step={4}
+                    value={colW}
+                    onChange={(e) => {
+                      const v = Number(e.target.value)
+                      if (!Number.isNaN(v)) setColW(Math.min(400, Math.max(60, Math.round(v))))
+                    }}
+                  />
+                </div>
                 <div className="flex items-center gap-1">
                   <div className="relative w-52">
                     <Search className="pointer-events-none absolute left-2.5 top-2 size-4 text-muted-foreground" />
@@ -688,6 +713,7 @@ export default function App() {
                 rangeEnd={axisRange?.[1]}
                 onViewChange={onViewChange}
                 fitKey={fitKey}
+                colW={colW}
               />
             )}
           </div>

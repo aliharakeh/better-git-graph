@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { branchColor } from "../lib/utils";
 
 const LANE_H = 88
-const COL_W = 148
+const DEFAULT_COL_W = 200
 const START_R = 18
 const MARGIN = { top: 48, right: 56, bottom: 36, left: 36 }
 
@@ -91,7 +91,7 @@ function edgeCurve(x1, y1, x2, y2, bend = 0) {
   return `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`
 }
 
-function yTracks(pts) {
+function yTracks(pts, colW) {
   const track = Array(pts.length).fill(0)
   const idx = pts.map((_, i) => i).filter((i) => Math.abs(pts[i].y2 - pts[i].y1) >= 6 && Math.abs(pts[i].x2 - pts[i].x1) >= 6)
   idx.sort((i, j) => pts[i].x1 + pts[i].x2 - (pts[j].x1 + pts[j].x2))
@@ -102,7 +102,7 @@ function yTracks(pts) {
       const j = idx[b]
       const am = (pts[i].x1 + pts[i].x2) / 2
       const bm = (pts[j].x1 + pts[j].x2) / 2
-      if (Math.abs(am - bm) >= COL_W / 2) continue
+      if (Math.abs(am - bm) >= colW / 2) continue
       const ay0 = Math.min(pts[i].y1, pts[i].y2), ay1 = Math.max(pts[i].y1, pts[i].y2)
       const by0 = Math.min(pts[j].y1, pts[j].y2), by1 = Math.max(pts[j].y1, pts[j].y2)
       if (ay0 < by1 - 8 && by0 < ay1 - 8) used.add(track[j])
@@ -198,7 +198,7 @@ function buildEdges(clusters, commits, branches, merges) {
   return [...edges.values()].map((e) => ({ ...e, branches: [...e.branches].sort() }))
 }
 
-export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHashes, selectedAuthors, jumpTo, showTags, rangeStart, rangeEnd, onViewChange, fitKey }) {
+export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHashes, selectedAuthors, jumpTo, showTags, rangeStart, rangeEnd, onViewChange, fitKey, colW = DEFAULT_COL_W }) {
   const wrapRef = useRef(null)
   const svgRef = useRef(null)
   const zoomRef = useRef(d3.zoomIdentity)
@@ -266,15 +266,16 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
 
     const width = size.w
     const height = size.h
+    const cw = Number(colW) || DEFAULT_COL_W
     const yOf = (name) => {
       const i = branches.indexOf(name)
       return i < 0 ? undefined : MARGIN.top + i * LANE_H + LANE_H / 2
     }
-    const xOf = (ts) => MARGIN.left + (dayIndex.get(localDay(ts)) ?? 0) * COL_W
+    const xOf = (ts) => MARGIN.left + (dayIndex.get(localDay(ts)) ?? 0) * cw
     const plotBottom = MARGIN.top + Math.max(branches.length, 1) * LANE_H
     const dim = (branch) => (related && !related.has(branch) ? 0.12 : 1)
     const firstX = MARGIN.left
-    const lastX = MARGIN.left + Math.max(days.length - 1, 0) * COL_W
+    const lastX = MARGIN.left + Math.max(days.length - 1, 0) * cw
     let latest = clusters[0]
     for (const g of clusters) {
       if (+new Date(g.timestamp) > +new Date(latest.timestamp)) latest = g
@@ -291,7 +292,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       const { key, k, y, sx } = anchorRef.current
       const i = days.findIndex(([d]) => d === key)
       if (i >= 0) {
-        const wx = MARGIN.left + i * COL_W
+        const wx = MARGIN.left + i * cw
         zoomRef.current = d3.zoomIdentity.translate(sx - wx * k, y).scale(k)
       }
     }
@@ -311,7 +312,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     const world = svg.append("g").attr("clip-path", "url(#net-clip)").append("g")
 
     days.forEach(([, info], i) => {
-      const x = MARGIN.left + i * COL_W
+      const x = MARGIN.left + i * cw
       world.append("line")
         .attr("x1", x).attr("x2", x)
         .attr("y1", MARGIN.top)
@@ -337,7 +338,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       const r2 = isStart(e.dst) ? START_R : e.dst.count > 1 ? 11 : 7
       return { e, fork, x1: s.x, y1: s.y, x2: d.x, y2: d.y, r1, r2 }
     }).filter(Boolean)
-    const tracks = yTracks(pts)
+    const tracks = yTracks(pts, cw)
     const laid = pts.map((p, i) => {
       const sameDay = Math.abs(p.x1 - p.x2) < 6
       const merge = !p.fork && p.e.src.branch !== p.e.dst.branch
@@ -468,10 +469,10 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
         world.attr("transform", event.transform)
         const t = event.transform
         const wx = (width / 2 - t.x) / t.k
-        let i = Math.round((wx - MARGIN.left) / COL_W)
+        let i = Math.round((wx - MARGIN.left) / cw)
         if (days.length) i = Math.max(0, Math.min(days.length - 1, i))
         if (days[i]) {
-          const colX = MARGIN.left + i * COL_W
+          const colX = MARGIN.left + i * cw
           anchorRef.current = { key: days[i][0], k: t.k, y: t.y, sx: colX * t.k + t.x }
         }
         if (event.sourceEvent) reportView(event.transform)
@@ -500,7 +501,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     return () => {
       d3.select(svgEl).on(".zoom", null).on("dblclick", null)
     }
-  }, [graph, related, size, selectedHash, matchHashes, selectedAuthors, jumpTo, onSelect, showTags, fitKey])
+  }, [graph, related, size, selectedHash, matchHashes, selectedAuthors, jumpTo, onSelect, showTags, fitKey, colW])
 
   const branches = graph?.branches || []
 
