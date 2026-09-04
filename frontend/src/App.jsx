@@ -833,9 +833,12 @@ function DebugParents({ commitHash, fallbackParents, extraHash, byHash }) {
   const parents = full?.parents?.length ? full.parents : fallbackParents || []
   const allParents = [...parents]
   if (extraHash && !allParents.includes(extraHash)) allParents.push(extraHash)
-  if (!allParents.length) return <div className="font-mono text-[11px] text-muted-foreground">no parents (root or unloaded)</div>
   return (
     <div className="space-y-0.5 font-mono text-[11px] text-muted-foreground">
+      <div className="break-all" title={commitHash}>
+        commit {commitHash}
+      </div>
+      {!allParents.length && <div>no parents (root or unloaded)</div>}
       {allParents.map((p, i) => {
         const n = byHash?.get(p)
         const branches = n ? [...new Set((n.on?.length ? n.on : n.branch ? [n.branch] : []).map(laneName))] : null
