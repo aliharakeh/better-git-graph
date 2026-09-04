@@ -220,28 +220,58 @@ function edgeCurve(x1, y1, x2, y2, bend = 0) {
   const dx = x2 - x1
   const dy = y2 - y1
   if (Math.abs(dy) < 6) {
-    const h = (dx >= 0 ? -1 : 1) * 26
+    // Same-lane hump must respect the track offset, otherwise all parallel
+    // same-lane edges draw the identical hump and overlap exactly.
+    const dir = dx >= 0 ? -1 : 1
+    const h = dir * (bend ? Math.min(Math.abs(bend), 52) : 26)
     return `M ${x1} ${y1} C ${x1 + dx / 3} ${y1 + h}, ${x1 + (2 * dx) / 3} ${y2 + h}, ${x2} ${y2}`
   }
   const mx = (x1 + x2) / 2 + bend
   return `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`
 }
 
+function xOverlap(a, b, pad = 4) {
+  const a0 = Math.min(a.x1, a.x2) - pad, a1 = Math.max(a.x1, a.x2) + pad
+  const b0 = Math.min(b.x1, b.x2) - pad, b1 = Math.max(b.x1, b.x2) + pad
+  return a0 < b1 && b0 < a1
+}
+
+function yOverlap(a, b, pad = 8) {
+  const a0 = Math.min(a.y1, a.y2) - pad, a1 = Math.max(a.y1, a.y2) + pad
+  const b0 = Math.min(b.y1, b.y2) - pad, b1 = Math.max(b.y1, b.y2) + pad
+  return a0 < b1 && b0 < a1
+}
+
 function yTracks(pts, colW) {
   const track = Array(pts.length).fill(0)
-  const idx = pts.map((_, i) => i).filter((i) => Math.abs(pts[i].y2 - pts[i].y1) >= 6 && Math.abs(pts[i].x2 - pts[i].x1) >= 6)
-  idx.sort((i, j) => pts[i].x1 + pts[i].x2 - (pts[j].x1 + pts[j].x2))
-  for (let a = 0; a < idx.length; a++) {
-    const i = idx[a]
+  // Cross-lane edges: conflict when y-spans overlap and x-midpoints are close.
+  const cross = pts.map((_, i) => i).filter((i) => Math.abs(pts[i].y2 - pts[i].y1) >= 6 && Math.abs(pts[i].x2 - pts[i].x1) >= 6)
+  cross.sort((i, j) => pts[i].x1 + pts[i].x2 - (pts[j].x1 + pts[j].x2))
+  for (let a = 0; a < cross.length; a++) {
+    const i = cross[a]
     const used = new Set()
     for (let b = 0; b < a; b++) {
-      const j = idx[b]
+      const j = cross[b]
       const am = (pts[i].x1 + pts[i].x2) / 2
       const bm = (pts[j].x1 + pts[j].x2) / 2
       if (Math.abs(am - bm) >= colW / 2) continue
-      const ay0 = Math.min(pts[i].y1, pts[i].y2), ay1 = Math.max(pts[i].y1, pts[i].y2)
-      const by0 = Math.min(pts[j].y1, pts[j].y2), by1 = Math.max(pts[j].y1, pts[j].y2)
-      if (ay0 < by1 - 8 && by0 < ay1 - 8) used.add(track[j])
+      if (yOverlap(pts[i], pts[j])) used.add(track[j])
+    }
+    let t = 0
+    while (used.has(t)) t++
+    track[i] = t
+  }
+  // Same-lane edges: previously all got track 0 (identical humps / collinear
+  // straight lines). Conflict when on the same lane and x-spans overlap.
+  const same = pts.map((_, i) => i).filter((i) => Math.abs(pts[i].y2 - pts[i].y1) < 6 && Math.abs(pts[i].x2 - pts[i].x1) >= 6)
+  same.sort((i, j) => Math.min(pts[i].x1, pts[i].x2) - Math.min(pts[j].x1, pts[j].x2))
+  for (let a = 0; a < same.length; a++) {
+    const i = same[a]
+    const used = new Set()
+    for (let b = 0; b < a; b++) {
+      const j = same[b]
+      if (Math.abs(pts[i].y1 - pts[j].y1) >= 6) continue
+      if (xOverlap(pts[i], pts[j])) used.add(track[j])
     }
     let t = 0
     while (used.has(t)) t++
@@ -580,19 +610,35 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     const laid = visiblePts.map((p, i) => {
       const sameDay = localDay(p.e.src.timestamp) === localDay(p.e.dst.timestamp)
       const merge = !p.fork && p.e.src.branch !== p.e.dst.branch
+      const sameLane = Math.abs(p.y2 - p.y1) < 6
+      const bend = 26 + signedTrack(tracks[i]) * 16
       const q = shorten(p.x1, p.y1, p.x2, p.y2, p.r1, p.r2)
+      let d
+      if (p.fork) {
+        d = `M ${q.x1} ${q.y1} L ${q.x2} ${q.y2}`
+      } else if (sameDay && !merge) {
+        // Collinear same-lane same-day edges overlap exactly when straight;
+        // lift conflicting ones into a shallow hump via their track offset.
+        d = tracks[i] > 0 && sameLane
+          ? edgeCurve(q.x1, q.y1, q.x2, q.y2, bend)
+          : `M ${q.x1} ${q.y1} L ${q.x2} ${q.y2}`
+      } else {
+        d = edgeCurve(q.x1, q.y1, q.x2, q.y2, bend)
+      }
       return {
         kind: "edge",
         ...p.e,
         fork: p.fork,
         merge,
-        d: p.fork || (sameDay && !merge)
-          ? `M ${q.x1} ${q.y1} L ${q.x2} ${q.y2}`
-          : edgeCurve(q.x1, q.y1, q.x2, q.y2, 26 + signedTrack(tracks[i]) * 16),
+        len: Math.hypot(p.x2 - p.x1, p.y2 - p.y1),
+        d,
         stroke: p.fork ? branchColor(p.e.dst.branch) : branchColor(p.e.src.branch !== p.e.dst.branch && !p.e.dst.isMerge ? p.e.dst.branch : p.e.src.branch),
         op: (!related || p.e.branches.some((b) => related.has(b))) && (!selectedAuthors || p.e.commits?.some((c) => selectedAuthors.has(c.author || "(unknown)"))) ? 1 : 0.12,
       }
     })
+
+    // Paint longest edges first so short local edges sit on top.
+    laid.sort((a, b) => b.len - a.len)
 
     const showTip = (event, d) => {
       const [px, py] = d3.pointer(event, wrapRef.current)
