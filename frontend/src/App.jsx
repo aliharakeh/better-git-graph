@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, CloudDownload, ExternalLink, FolderOpen, GitBranch, GitMerge, Loader2, Search, Sparkles, X } from "lucide-react";
+import { Bug, ChevronLeft, ChevronRight, CloudDownload, ExternalLink, FolderOpen, GitBranch, GitMerge, Loader2, Search, Sparkles, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FetchRemote, GetAIConfig, GetRemote, ListBranches, LoadRepo, SaveRemoteToken, SelectRepo } from "../wailsjs/go/main/App";
 import { BrowserOpenURL } from "../wailsjs/runtime/runtime";
@@ -151,6 +151,7 @@ export default function App() {
   const [aiOpen, setAiOpen] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
   const [aiInfo, setAiInfo] = useState(null)
+  const [showDebug, setShowDebug] = useState(false)
   const pathRef = useRef(path)
   pathRef.current = path
   const loadSeq = useRef(0)
@@ -400,6 +401,7 @@ export default function App() {
   }, [visibleGraph, msgQuery])
   const matchHashes = useMemo(() => searchHits.map((c) => c.hash), [searchHits])
   const curHit = hitIndex >= 0 && hitIndex < searchHits.length ? hitIndex : -1
+  const graphByHash = useMemo(() => new Map((graph?.commits || []).map((c) => [c.hash, c])), [graph])
 
   function setCommitSearch(value) {
     setMsgQuery(value)
@@ -747,10 +749,23 @@ export default function App() {
                   </button>
                 </div>
               </div>
+              <label className="mb-2 flex cursor-pointer items-center justify-between rounded-md border border-border px-2 py-1.5 text-xs text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5">
+                  <Bug className="size-3.5" />
+                  Debug parents
+                </span>
+                <input
+                  type="checkbox"
+                  checked={showDebug}
+                  onChange={(e) => setShowDebug(e.target.checked)}
+                  className="size-3.5 accent-primary"
+                />
+              </label>
               {inspect.kind === "merge" ? (
                 <dl className="space-y-2 text-xs">
                   <Row label="Merge commit" value={inspect.hash} mono action={<CommitLink prefix={graph?.commitUrl} hash={inspect.hash} />} />
                   <Row label="Message" value={<span className="font-medium" style={{ color: branchColor(inspect.sourceBranch) }}>{inspect.subject || "—"}</span>} />
+                  {showDebug && <DebugParents commitHash={inspect.hash} fallbackParents={inspect.parents} extraHash={inspect.sourceHash} byHash={graphByHash} />}
                   {inspect.tags?.length ? <Row label="Tags" value={inspect.tags.join(" · ")} /> : null}
                   <Row label="Source branch" value={inspect.sourceBranch} />
                   <Row label="Target branch" value={inspect.targetBranch} />
@@ -776,6 +791,7 @@ export default function App() {
                           {c.isMerge ? <span className="ml-1 opacity-70">merge</span> : null}
                           {c.tags?.length ? <span className="ml-1 text-amber-400">{c.tags.join(" · ")}</span> : null}
                         </dd>
+                        {showDebug && <DebugParents commitHash={c.hash} fallbackParents={c.parents} byHash={graphByHash} />}
                       </div>
                     ))}
                   </div>
@@ -784,6 +800,7 @@ export default function App() {
                 <dl className="space-y-2 text-xs">
                   <Row label="Commit" value={inspect.hash} mono action={<CommitLink prefix={graph?.commitUrl} hash={inspect.hash} />} />
                   <Row label="Message" value={inspect.isMerge ? <span className="font-medium" style={{ color: branchColor(inspect.sourceBranch) }}>{inspect.subject || "—"}</span> : (inspect.subject || "—")} />
+                  {showDebug && <DebugParents commitHash={inspect.hash} fallbackParents={inspect.parents} byHash={graphByHash} />}
                   <Row label="Branch" value={inspect.branch} />
                   {inspect.tags?.length ? <Row label="Tags" value={inspect.tags.join(" · ")} /> : null}
                   <Row label="Timestamp" value={<TimeChip ts={inspect.timestamp} withDate />} />
@@ -807,6 +824,27 @@ export default function App() {
       {chatOpen && inspect && (
         <CommitChatDialog path={graph?.path || path} context={commitChatContext(inspect)} onClose={() => setChatOpen(false)} />
       )}
+    </div>
+  )
+}
+
+function DebugParents({ commitHash, fallbackParents, extraHash, byHash }) {
+  const full = byHash?.get(commitHash)
+  const parents = full?.parents?.length ? full.parents : fallbackParents || []
+  const allParents = [...parents]
+  if (extraHash && !allParents.includes(extraHash)) allParents.push(extraHash)
+  if (!allParents.length) return <div className="font-mono text-[11px] text-muted-foreground">no parents (root or unloaded)</div>
+  return (
+    <div className="space-y-0.5 font-mono text-[11px] text-muted-foreground">
+      {allParents.map((p, i) => {
+        const n = byHash?.get(p)
+        const branches = n ? [...new Set((n.on?.length ? n.on : n.branch ? [n.branch] : []).map(laneName))] : null
+        return (
+          <div key={`${commitHash}:${p}`} className="break-all" title={p}>
+            P{i + 1} {String(p).slice(0, 7)} · {branches ? (branches.length ? branches.join(", ") : "(no branch)") : "outside loaded range"}
+          </div>
+        )
+      })}
     </div>
   )
 }
