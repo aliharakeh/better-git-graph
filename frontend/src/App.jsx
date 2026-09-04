@@ -137,6 +137,8 @@ export default function App() {
   const [jumpTo, setJumpTo] = useState(null)
   const [fitKey, setFitKey] = useState(0)
   const [colW, setColW] = useState(200)
+  const [hideLongSelfEdge, setHideLongSelfEdge] = useState(false)
+  const [collapseDay, setCollapseDay] = useState(false)
   const [authorQuery, setAuthorQuery] = useState("")
   const [focused, setFocused] = useState("")
   const [selected, setSelected] = useState(null)
@@ -376,6 +378,12 @@ export default function App() {
       return true
     })
     const srcByHash = new Map()
+    // Look up source from all merges first so merge nodes keep their source
+    // color even when the source branch lane is hidden.
+    for (const m of graph.merges || []) {
+      const src = laneName(m.sourceBranch)
+      if (src && !srcByHash.has(m.hash)) srcByHash.set(m.hash, src)
+    }
     for (const m of merges) {
       if (m.sourceBranch && !srcByHash.has(m.hash)) srcByHash.set(m.hash, m.sourceBranch)
     }
@@ -413,11 +421,38 @@ export default function App() {
     if (!n) return
     const i = curHit < 0 ? (dir > 0 ? 0 : n - 1) : (curHit + dir + n) % n
     const c = searchHits[i]
-    const day = localDay(c.timestamp)
-    const commits = visibleGraph.commits
-      .filter((x) => x.branch === c.branch && localDay(x.timestamp) === day)
-      .sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp))
     setHitIndex(i)
+    // Collapsed mode shows one node per branch+day — select that whole day.
+    if (collapseDay) {
+      const day = localDay(c.timestamp)
+      const commits = visibleGraph.commits
+        .filter((x) => x.branch === c.branch && localDay(x.timestamp) === day)
+        .sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp))
+      setSelected(commits.length > 1 ? { kind: "cluster", ...c, count: commits.length, commits } : { kind: "commit", ...c })
+      setJumpTo({ hash: c.hash, n: (jumpTo?.n || 0) + 1 })
+      return
+    }
+    // Merge commits are standalone nodes — select them individually.
+    if (c.isMerge) {
+      setSelected({ kind: "commit", ...c })
+      setJumpTo({ hash: c.hash, n: (jumpTo?.n || 0) + 1 })
+      return
+    }
+    // Normal commits cluster by branch+day, split into before/after segments
+    // around that day's merges — select only the segment holding this hit.
+    const day = localDay(c.timestamp)
+    const dayMerges = visibleGraph.commits
+      .filter((x) => x.isMerge && x.branch === c.branch && localDay(x.timestamp) === day)
+      .sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp))
+    const segOf = (t) => {
+      let seg = 0
+      while (seg < dayMerges.length && +new Date(dayMerges[seg].timestamp) <= t) seg++
+      return seg
+    }
+    const hitSeg = segOf(+new Date(c.timestamp))
+    const commits = visibleGraph.commits
+      .filter((x) => !x.isMerge && x.branch === c.branch && localDay(x.timestamp) === day && segOf(+new Date(x.timestamp)) === hitSeg)
+      .sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp))
     setSelected(commits.length > 1 ? { kind: "cluster", ...c, count: commits.length, commits } : { kind: "commit", ...c })
     setJumpTo({ hash: c.hash, n: (jumpTo?.n || 0) + 1 })
   }
@@ -624,6 +659,30 @@ export default function App() {
             </div>
             {graph && (
               <div className="ml-auto flex shrink-0 items-center gap-3">
+                <label
+                  className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground"
+                  title="For merges where both parents are on the same branch, hide the longer of the two parent edges"
+                >
+                  <input
+                    type="checkbox"
+                    checked={hideLongSelfEdge}
+                    onChange={(e) => setHideLongSelfEdge(e.target.checked)}
+                    className="size-3.5 accent-primary"
+                  />
+                  Trim self-merges
+                </label>
+                <label
+                  className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground"
+                  title="Collapse merges and commits into a single node per branch per day"
+                >
+                  <input
+                    type="checkbox"
+                    checked={collapseDay}
+                    onChange={(e) => setCollapseDay(e.target.checked)}
+                    className="size-3.5 accent-primary"
+                  />
+                  One cluster/day
+                </label>
                 <div className="flex items-center gap-2" title="Day column spacing (x-axis gap)">
                   <span className="text-[11px] text-muted-foreground">X-gap</span>
                   <input
@@ -716,6 +775,8 @@ export default function App() {
                 onViewChange={onViewChange}
                 fitKey={fitKey}
                 colW={colW}
+                hideLongSelfEdge={hideLongSelfEdge}
+                collapseDay={collapseDay}
               />
             )}
           </div>

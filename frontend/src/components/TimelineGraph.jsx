@@ -25,30 +25,159 @@ function clusterKey(branch, ts) {
   return `${branch}\0${localDay(ts)}`
 }
 
-function clusterByDay(commits) {
+function nodeId(g) {
+  if (!g) return ""
+  if (g.isSingleMerge) return `m\0${g.hash}`
+  const base = clusterKey(g.branch, g.timestamp)
+  return g._seg != null ? `c\0${base}\0${g._seg}` : `c\0${base}`
+}
+
+function clusterByDay(commits, collapseDay = false) {
   const map = new Map()
+  if (collapseDay) {
+    // Single node per (branch, day): merges + normal commits together.
+    const byDay = new Map()
+    for (const c of commits) {
+      const key = clusterKey(c.branch, c.timestamp)
+      let arr = byDay.get(key)
+      if (!arr) {
+        arr = []
+        byDay.set(key, arr)
+      }
+      arr.push(c)
+    }
+    for (const [key, arr] of byDay.entries()) {
+      const sorted = arr.slice().sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp) || String(a.hash).localeCompare(String(b.hash)))
+      const first = sorted[0]
+      const last = sorted[sorted.length - 1]
+      const g = {
+        ...first,
+        hash: last.hash,
+        timestamp: last.timestamp,
+        subject: last.subject,
+        author: last.author,
+        count: sorted.length,
+        commits: sorted,
+        merges: [],
+        tags: [...new Set(sorted.flatMap((c) => c.tags || []))],
+        isMerge: sorted.some((c) => c.isMerge),
+        isSingleMerge: false,
+      }
+      // A multi-commit day represents the whole lane: keep lane color.
+      // Only a lone merge keeps its source-branch color.
+      if (sorted.length > 1) delete g.sourceBranch
+      map.set(`c\0${key}`, g)
+    }
+    for (const g of map.values()) {
+      g._slot = 0
+      g._slots = 1
+      g._center = 0
+    }
+    return map
+  }
+  const mergesByDay = new Map()
+  const normalsByDay = new Map()
   for (const c of commits) {
     const key = clusterKey(c.branch, c.timestamp)
-    let g = map.get(key)
-    if (!g) {
-      g = { ...c, count: 0, commits: [], merges: [], tags: [] }
-      map.set(key, g)
+    if (c.isMerge) {
+      let arr = mergesByDay.get(key)
+      if (!arr) {
+        arr = []
+        mergesByDay.set(key, arr)
+      }
+      arr.push(c)
+    } else {
+      let arr = normalsByDay.get(key)
+      if (!arr) {
+        arr = []
+        normalsByDay.set(key, arr)
+      }
+      arr.push(c)
     }
-    g.commits.push(c)
-    g.count++
-    g.isMerge = g.isMerge || c.isMerge
-    for (const t of c.tags || []) {
-      if (!g.tags.includes(t)) g.tags.push(t)
+  }
+  // Merge commits always get their own individual node — never clustered.
+  for (const arr of mergesByDay.values()) {
+    for (const c of arr) {
+      const key = `m\0${c.hash}`
+      if (!map.has(key)) {
+        map.set(key, { ...c, count: 1, commits: [c], merges: [], tags: [...(c.tags || [])], isSingleMerge: true, isMerge: true })
+      }
     }
-    if (+new Date(c.timestamp) >= +new Date(g.timestamp)) {
-      g.hash = c.hash
-      g.timestamp = c.timestamp
-      g.subject = c.subject
-      g.author = c.author
+  }
+  // Normal commits are clustered by branch + day, but split into
+  // before / between / after segments around that day's merges so the
+  // left-to-right time sequence stays correct.
+  for (const [dayKey, arr] of normalsByDay.entries()) {
+    const dayMerges = (mergesByDay.get(dayKey) || [])
+      .slice()
+      .sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp) || String(a.hash).localeCompare(String(b.hash)))
+    const sorted = arr.slice().sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp) || String(a.hash).localeCompare(String(b.hash)))
+    // Bucket each normal commit by how many of the day's merges precede it.
+    const segments = dayMerges.length ? Array.from({ length: dayMerges.length + 1 }, () => []) : [[]]
+    if (!dayMerges.length) {
+      segments[0] = sorted
+    } else {
+      const mergeTimes = dayMerges.map((m) => +new Date(m.timestamp))
+      for (const c of sorted) {
+        const t = +new Date(c.timestamp)
+        let seg = 0
+        while (seg < mergeTimes.length && mergeTimes[seg] <= t) seg++
+        segments[seg].push(c)
+      }
     }
+    segments.forEach((bucket, segIdx) => {
+      if (!bucket.length) return
+      const key = dayMerges.length ? `c\0${dayKey}\0${segIdx}` : `c\0${dayKey}`
+      let g = map.get(key)
+      if (!g) {
+        const first = bucket[0]
+        g = { ...first, count: 0, commits: [], merges: [], tags: [] }
+        if (dayMerges.length) g._seg = segIdx
+        map.set(key, g)
+      }
+      for (const c of bucket) {
+        g.commits.push(c)
+        g.count++
+        for (const t of c.tags || []) {
+          if (!g.tags.includes(t)) g.tags.push(t)
+        }
+        if (+new Date(c.timestamp) >= +new Date(g.timestamp)) {
+          g.hash = c.hash
+          g.timestamp = c.timestamp
+          g.subject = c.subject
+          g.author = c.author
+        }
+      }
+    })
   }
   for (const g of map.values()) {
     g.commits.sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp))
+  }
+  // Assign intra-day x offsets in true time order. Nodes sharing a
+  // (branch, day) column are sorted by timestamp left-to-right; when the
+  // group contains merge(s), the merge time-center is pinned to the day's
+  // vertical line (offset 0) so before-clusters sit left and after-clusters
+  // sit right — keeping the time sequence correct.
+  const groups = new Map()
+  for (const g of map.values()) {
+    const key = clusterKey(g.branch, g.timestamp)
+    let arr = groups.get(key)
+    if (!arr) {
+      arr = []
+      groups.set(key, arr)
+    }
+    arr.push(g)
+  }
+  for (const arr of groups.values()) {
+    arr.sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp) || String(a.hash).localeCompare(String(b.hash)))
+    const n = arr.length
+    const mergeIdx = arr.map((g, i) => (g.isSingleMerge ? i : -1)).filter((i) => i >= 0)
+    const center = mergeIdx.length ? mergeIdx.reduce((s, i) => s + i, 0) / mergeIdx.length : (n - 1) / 2
+    arr.forEach((g, i) => {
+      g._slot = i
+      g._slots = n
+      g._center = center
+    })
   }
   return map
 }
@@ -78,6 +207,13 @@ function shorten(x1, y1, x2, y2, a, b) {
 function signedTrack(t) {
   if (!t) return 0
   return (t % 2 === 1 ? 1 : -1) * Math.ceil(t / 2)
+}
+
+function nodeColor(d) {
+  // Merge nodes sit on the target lane but represent the incoming (source)
+  // branch, so they take the source branch color.
+  if (d?.isMerge) return branchColor(d.sourceBranch || d.branch)
+  return branchColor(d.branch)
 }
 
 function edgeCurve(x1, y1, x2, y2, bend = 0) {
@@ -126,24 +262,36 @@ function diamondPath(r) {
 function branchStartKeys(clusters, branches) {
   const keys = new Set()
   for (const name of branches) {
+    // Branch start marker goes on the earliest *normal* day-cluster, never on
+    // a standalone merge node, so merges keep their merge styling.
     let best = null
     let bestT = Infinity
     for (const g of clusters) {
-      if (g.branch !== name) continue
+      if (g.branch !== name || g.isSingleMerge) continue
       const t = +new Date(g.commits[0]?.timestamp || g.timestamp)
       if (t < bestT) {
         bestT = t
         best = g
       }
     }
-    if (best) keys.add(clusterKey(best.branch, best.timestamp))
+    if (!best) {
+      for (const g of clusters) {
+        if (g.branch !== name) continue
+        const t = +new Date(g.commits[0]?.timestamp || g.timestamp)
+        if (t < bestT) {
+          bestT = t
+          best = g
+        }
+      }
+    }
+    if (best) keys.add(nodeId(best))
   }
   return keys
 }
 
 function addEdge(edges, src, dst, names, commit) {
   if (!src || !dst || src === dst) return
-  const key = `${clusterKey(src.branch, src.timestamp)}->${clusterKey(dst.branch, dst.timestamp)}`
+  const key = `${nodeId(src)}->${nodeId(dst)}`
   let e = edges.get(key)
   if (!e) {
     e = { src, dst, branches: new Set(), commits: [] }
@@ -159,10 +307,17 @@ function addEdge(edges, src, dst, names, commit) {
 }
 
 function buildEdges(clusters, commits, branches, merges) {
-  const byKey = new Map(clusters.map((g) => [clusterKey(g.branch, g.timestamp), g]))
+  const byKey = new Map()
+  for (const g of clusters) {
+    const k = clusterKey(g.branch, g.timestamp)
+    // Multiple nodes (merges + day cluster) can share a day column; keep the earliest.
+    if (!byKey.has(k)) byKey.set(k, g)
+  }
   const byHash = new Map()
   for (const g of clusters) {
-    for (const c of g.commits) byHash.set(c.hash, g)
+    for (const c of g.commits) {
+      if (!byHash.has(c.hash)) byHash.set(c.hash, g)
+    }
   }
   const allow = new Set(branches)
   const edges = new Map()
@@ -198,7 +353,63 @@ function buildEdges(clusters, commits, branches, merges) {
   return [...edges.values()].map((e) => ({ ...e, branches: [...e.branches].sort() }))
 }
 
-export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHashes, selectedAuthors, jumpTo, showTags, rangeStart, rangeEnd, onViewChange, fitKey, colW = DEFAULT_COL_W }) {
+// For self-branch merges (merge node + all incoming edges on the same lane),
+// the two parent edges overlap on one lane. Drop the visually longest one to
+// reduce clutter. Runs on laid-out points so "longest" is screen distance.
+function pruneLongSelfMergeEdges(pts) {
+  const byDst = new Map()
+  pts.forEach((p, i) => {
+    const key = nodeId(p?.e?.dst)
+    if (!key) return
+    let arr = byDst.get(key)
+    if (!arr) {
+      arr = []
+      byDst.set(key, arr)
+    }
+    arr.push(i)
+  })
+  const drop = new Set()
+  const survivorByDst = new Map()
+  for (const idxs of byDst.values()) {
+    if (idxs.length < 2) continue
+    const dst = pts[idxs[0]].e.dst
+    if (!dst?.isMerge) continue
+    if (!idxs.every((i) => pts[i].e.src.branch === dst.branch)) continue
+    let longest = idxs[0]
+    let longestLen = -1
+    for (const i of idxs) {
+      const p = pts[i]
+      const len = Math.hypot(p.x2 - p.x1, p.y2 - p.y1)
+      if (len > longestLen) {
+        longestLen = len
+        longest = i
+      }
+    }
+    drop.add(longest)
+    survivorByDst.set(nodeId(dst), idxs.filter((i) => i !== longest))
+  }
+  if (!drop.size) return pts
+  // Fold dropped edges' branches/commits into a survivor so author/related
+  // filtering still sees them.
+  for (const [dstKey, survivors] of survivorByDst.entries()) {
+    void dstKey
+    if (!survivors.length) continue
+    const keep = pts[survivors[0]].e
+    for (const i of [...drop]) {
+      const e = pts[i]?.e
+      if (!e || nodeId(e.dst) !== nodeId(keep.dst)) continue
+      for (const b of e.branches || []) {
+        if (b && !keep.branches.includes(b)) keep.branches.push(b)
+      }
+      for (const c of e.commits || []) {
+        if (c?.hash && !keep.commits.some((x) => x.hash === c.hash)) keep.commits.push(c)
+      }
+    }
+  }
+  return pts.filter((_, i) => !drop.has(i))
+}
+
+export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHashes, selectedAuthors, jumpTo, showTags, rangeStart, rangeEnd, onViewChange, fitKey, colW = DEFAULT_COL_W, hideLongSelfEdge = false, collapseDay = false }) {
   const wrapRef = useRef(null)
   const svgRef = useRef(null)
   const zoomRef = useRef(d3.zoomIdentity)
@@ -244,16 +455,31 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
 
     const branches = [...new Set(graph.branches.map(laneName))]
     const commits = graph.commits.map((c) => ({ ...c, branch: laneName(c.branch), on: (c.on || [c.branch]).map(laneName) })).filter((c) => branches.includes(c.branch))
-    const clusterMap = clusterByDay(commits)
+    const clusterMap = clusterByDay(commits, collapseDay)
     const clusters = [...clusterMap.values()]
     const merges = (graph.merges || []).map((m) => ({ ...m, sourceBranch: laneName(m.sourceBranch), targetBranch: laneName(m.targetBranch) }))
+    const mergeNodeByHash = new Map()
+    const dayClusterByKey = new Map()
+    for (const g of clusters) {
+      if (g.isSingleMerge) {
+        if (!mergeNodeByHash.has(g.hash)) mergeNodeByHash.set(g.hash, g)
+      } else if (!dayClusterByKey.has(clusterKey(g.branch, g.timestamp))) {
+        // A day may now hold several before/after segments; keep the earliest
+        // for legacy merge-event fallback lookups.
+        dayClusterByKey.set(clusterKey(g.branch, g.timestamp), g)
+      }
+    }
     for (const m of merges) {
       if (m.kind === "branch") continue
-      (clusterMap.get(clusterKey(m.targetBranch, m.timestamp)) || clusterMap.get(clusterKey(m.sourceBranch, m.timestamp)))?.merges.push(m)
+      const target =
+        mergeNodeByHash.get(m.hash) ||
+        dayClusterByKey.get(clusterKey(m.targetBranch, m.timestamp)) ||
+        dayClusterByKey.get(clusterKey(m.sourceBranch, m.timestamp))
+      target?.merges.push(m)
     }
     const edges = buildEdges(clusters, commits, branches, merges)
     const startKeys = branchStartKeys(clusters, branches)
-    const isStart = (d) => startKeys.has(clusterKey(d.branch, d.timestamp))
+    const isStart = (d) => startKeys.has(nodeId(d))
 
     const dayMin = new Map()
     for (const g of clusters) {
@@ -271,7 +497,18 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       const i = branches.indexOf(name)
       return i < 0 ? undefined : MARGIN.top + i * LANE_H + LANE_H / 2
     }
-    const xOf = (ts) => MARGIN.left + (dayIndex.get(localDay(ts)) ?? 0) * cw
+    const xBase = (ts) => MARGIN.left + (dayIndex.get(localDay(ts)) ?? 0) * cw
+    // Merge nodes sit exactly on the day's vertical line (offset 0);
+    // before/after commit segments are offset left/right in time order.
+    // _slot/_center are time-order ranks within the (branch, day) group.
+    const slotOffset = (d) => {
+      const n = d?._slots || 1
+      if (n < 2) return 0
+      const step = Math.min(44, Math.max(32, (cw - 80) / (n - 1)))
+      const center = d?._center ?? (n - 1) / 2
+      return ((d._slot || 0) - center) * step
+    }
+    const xOfNode = (d) => xBase(d.timestamp) + slotOffset(d)
     const plotBottom = MARGIN.top + Math.max(branches.length, 1) * LANE_H
     const dim = (branch) => (related && !related.has(branch) ? 0.12 : 1)
     const firstX = MARGIN.left
@@ -281,7 +518,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       if (+new Date(g.timestamp) > +new Date(latest.timestamp)) latest = g
     }
     const latestView = latest
-      ? viewAt(width, height, xOf(latest.timestamp), yOf(latest.branch) ?? height / 2)
+      ? viewAt(width, height, xOfNode(latest), yOf(latest.branch) ?? height / 2)
       : d3.zoomIdentity
 
     if (zoomKeyRef.current !== fitKey) {
@@ -330,17 +567,18 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     })
 
     const pts = edges.map((e) => {
-      const s = { x: xOf(e.src.timestamp), y: yOf(e.src.branch) }
-      const d = { x: xOf(e.dst.timestamp), y: yOf(e.dst.branch) }
+      const s = { x: xOfNode(e.src), y: yOf(e.src.branch) }
+      const d = { x: xOfNode(e.dst), y: yOf(e.dst.branch) }
       if (s.y == null || d.y == null) return null
       const fork = isStart(e.dst) && e.src.branch !== e.dst.branch
       const r1 = isStart(e.src) ? START_R : e.src.count > 1 ? 11 : 7
       const r2 = isStart(e.dst) ? START_R : e.dst.count > 1 ? 11 : 7
       return { e, fork, x1: s.x, y1: s.y, x2: d.x, y2: d.y, r1, r2 }
     }).filter(Boolean)
-    const tracks = yTracks(pts, cw)
-    const laid = pts.map((p, i) => {
-      const sameDay = Math.abs(p.x1 - p.x2) < 6
+    const visiblePts = hideLongSelfEdge ? pruneLongSelfMergeEdges(pts) : pts
+    const tracks = yTracks(visiblePts, cw)
+    const laid = visiblePts.map((p, i) => {
+      const sameDay = localDay(p.e.src.timestamp) === localDay(p.e.dst.timestamp)
       const merge = !p.fork && p.e.src.branch !== p.e.dst.branch
       const q = shorten(p.x1, p.y1, p.x2, p.y2, p.r1, p.r2)
       return {
@@ -383,7 +621,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     const innerR = (d) => (d.count > 1 ? 9 : 5) + (isSelected(d) ? 2 : 0)
 
     const commitDots = world.append("g").selectAll("g").data(clusters).join("g")
-      .attr("transform", (d) => `translate(${xOf(d.timestamp)},${yOf(d.branch)})`)
+      .attr("transform", (d) => `translate(${xOfNode(d)},${yOf(d.branch)})`)
       .attr("opacity", (d) => (filterOn && !isHit(d) ? 0.2 : 0.9) * dim(d.branch))
       .style("cursor", "pointer")
       .on("pointerenter", (event, d) => showTip(event, d))
@@ -391,8 +629,14 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       .on("pointerleave", () => setTip(null))
       .on("click", (event, d) => {
         event.stopPropagation()
-        if (d.count === 1 && d.merges?.length === 1 && d.merges[0].kind !== "branch") {
-          onSelect({ kind: "merge", ...d.merges[0], tags: d.tags })
+        // Each merge commit is its own node — open the merge inspector directly.
+        if (d.isSingleMerge) {
+          const m = d.merges?.find((x) => x.hash === d.hash && x.kind !== "branch") || d.merges?.[0]
+          if (m) {
+            onSelect({ kind: "merge", ...m, tags: d.tags })
+            return
+          }
+          onSelect({ kind: "commit", ...d })
           return
         }
         onSelect({ kind: d.count > 1 ? "cluster" : "commit", ...d })
@@ -402,11 +646,11 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     commitDots.filter((d) => d.isMerge && !isStart(d)).append("circle")
       .attr("r", (d) => innerR(d) + 6)
       .attr("fill", "#0b1220")
-      .attr("stroke", (d) => branchColor(d.branch))
+      .attr("stroke", (d) => nodeColor(d))
       .attr("stroke-width", 2.5)
     commitDots.filter((d) => !isStart(d)).append("circle")
       .attr("r", innerR)
-      .attr("fill", (d) => branchColor(d.branch))
+      .attr("fill", (d) => nodeColor(d))
       .attr("stroke", (d) => (isSelected(d) ? "#fff" : "transparent"))
       .attr("stroke-width", 2)
     commitDots.filter(isStart).append("path")
@@ -492,7 +736,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       if (hit) {
         const k = zoomRef.current.k
         zoomRef.current = d3.zoomIdentity
-          .translate(width / 2 - k * xOf(hit.timestamp), height / 2 - k * yOf(hit.branch))
+          .translate(width / 2 - k * xOfNode(hit), height / 2 - k * yOf(hit.branch))
           .scale(k)
       }
     }
@@ -501,7 +745,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     return () => {
       d3.select(svgEl).on(".zoom", null).on("dblclick", null)
     }
-  }, [graph, related, size, selectedHash, matchHashes, selectedAuthors, jumpTo, onSelect, showTags, fitKey, colW])
+  }, [graph, related, size, selectedHash, matchHashes, selectedAuthors, jumpTo, onSelect, showTags, fitKey, colW, hideLongSelfEdge, collapseDay])
 
   const branches = graph?.branches || []
 
