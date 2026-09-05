@@ -1,4 +1,4 @@
-import { Bug, ChevronLeft, ChevronRight, CloudDownload, ExternalLink, FolderOpen, GitBranch, GitMerge, Loader2, Search, Sparkles, X } from "lucide-react";
+import { Bug, ChevronDown, ChevronLeft, ChevronRight, CloudDownload, ExternalLink, FolderOpen, GitBranch, GitMerge, Loader2, Search, SlidersHorizontal, Sparkles, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FetchRemote, GetAIConfig, GetRemote, ListBranches, LoadRepo, SaveRemoteToken, SelectRepo } from "../wailsjs/go/main/App";
 import { BrowserOpenURL } from "../wailsjs/runtime/runtime";
@@ -137,8 +137,11 @@ export default function App() {
   const [jumpTo, setJumpTo] = useState(null)
   const [fitKey, setFitKey] = useState(0)
   const [colW, setColW] = useState(200)
-  const [hideLongSelfEdge, setHideLongSelfEdge] = useState(false)
-  const [collapseDay, setCollapseDay] = useState(false)
+  const [hideLongSelfEdge, setHideLongSelfEdge] = useState(true)
+  const [hideOrphanMerges, setHideOrphanMerges] = useState(true)
+  const [collapseDay, setCollapseDay] = useState(true)
+  const [viewMenuOpen, setViewMenuOpen] = useState(false)
+  const viewMenuRef = useRef(null)
   const [authorQuery, setAuthorQuery] = useState("")
   const [focused, setFocused] = useState("")
   const [selected, setSelected] = useState(null)
@@ -171,6 +174,20 @@ export default function App() {
   useEffect(() => {
     refreshAI()
   }, [])
+
+  useEffect(() => {
+    if (!viewMenuOpen) return
+    function onDown(e) {
+      if (viewMenuRef.current && !viewMenuRef.current.contains(e.target)) setViewMenuOpen(false)
+      if (e.key === "Escape") setViewMenuOpen(false)
+    }
+    document.addEventListener("mousedown", onDown)
+    document.addEventListener("keydown", onDown)
+    return () => {
+      document.removeEventListener("mousedown", onDown)
+      document.removeEventListener("keydown", onDown)
+    }
+  }, [viewMenuOpen])
 
   async function load(nextPath) {
     const target = (nextPath ?? path).trim()
@@ -367,7 +384,7 @@ export default function App() {
     if (!graph) return null
     const names = rankedBranches.filter((b) => visible.has(b))
     const shown = new Set(names)
-    const merges = (graph.merges || []).map((m) => ({
+    let merges = (graph.merges || []).map((m) => ({
       ...m,
       sourceBranch: laneName(m.sourceBranch),
       targetBranch: laneName(m.targetBranch),
@@ -387,18 +404,38 @@ export default function App() {
     for (const m of merges) {
       if (m.sourceBranch && !srcByHash.has(m.hash)) srcByHash.set(m.hash, m.sourceBranch)
     }
+    let commits = (graph.commits || []).map((c) => ({
+      ...c,
+      branch: laneName(c.branch),
+      on: (c.on || [c.branch]).map(laneName),
+      sourceBranch: c.isMerge ? srcByHash.get(c.hash) : undefined,
+    })).filter((c) => shown.has(c.branch))
+    if (hideOrphanMerges) {
+      // A merge is orphaned when neither parent edge can be drawn: no parent
+      // is loaded and no loaded child points at it (e.g. its source branch
+      // was deleted and its history is outside the loaded window).
+      const hashSet = new Set(commits.map((c) => c.hash))
+      const hasChild = new Set()
+      for (const c of commits) {
+        for (const p of c.parents || []) {
+          if (hashSet.has(p)) hasChild.add(p)
+        }
+      }
+      const orphan = new Set(
+        commits.filter((c) => c.isMerge && !(c.parents || []).some((p) => hashSet.has(p)) && !hasChild.has(c.hash)).map((c) => c.hash),
+      )
+      if (orphan.size) {
+        commits = commits.filter((c) => !orphan.has(c.hash))
+        merges = merges.filter((m) => !orphan.has(m.hash))
+      }
+    }
     return {
       ...graph,
       branches: names,
-      commits: (graph.commits || []).map((c) => ({
-        ...c,
-        branch: laneName(c.branch),
-        on: (c.on || [c.branch]).map(laneName),
-        sourceBranch: c.isMerge ? srcByHash.get(c.hash) : undefined,
-      })).filter((c) => shown.has(c.branch)),
+      commits,
       merges,
     }
-  }, [graph, rankedBranches, visible])
+  }, [graph, rankedBranches, visible, hideOrphanMerges])
 
   const searchHits = useMemo(() => {
     const msg = msgQuery.trim().toLowerCase()
@@ -659,30 +696,78 @@ export default function App() {
             </div>
             {graph && (
               <div className="ml-auto flex shrink-0 items-center gap-3">
-                <label
-                  className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground"
-                  title="For merges where both parents are on the same branch, hide the longer of the two parent edges"
-                >
-                  <input
-                    type="checkbox"
-                    checked={hideLongSelfEdge}
-                    onChange={(e) => setHideLongSelfEdge(e.target.checked)}
-                    className="size-3.5 accent-primary"
-                  />
-                  Trim self-merges
-                </label>
-                <label
-                  className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground"
-                  title="Collapse merges and commits into a single node per branch per day"
-                >
-                  <input
-                    type="checkbox"
-                    checked={collapseDay}
-                    onChange={(e) => setCollapseDay(e.target.checked)}
-                    className="size-3.5 accent-primary"
-                  />
-                  One cluster/day
-                </label>
+                <div ref={viewMenuRef} className="relative">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-1.5 text-xs"
+                    onClick={() => setViewMenuOpen((v) => !v)}
+                    aria-expanded={viewMenuOpen}
+                    aria-haspopup="menu"
+                    title="Graph view options"
+                  >
+                    <SlidersHorizontal />
+                    View
+                    {[hideLongSelfEdge, hideOrphanMerges, collapseDay].filter(Boolean).length > 0 && (
+                      <span className="flex size-4 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">
+                        {[hideLongSelfEdge, hideOrphanMerges, collapseDay].filter(Boolean).length}
+                      </span>
+                    )}
+                    <ChevronDown className={`size-3 transition-transform ${viewMenuOpen ? "rotate-180" : ""}`} />
+                  </Button>
+                  {viewMenuOpen && (
+                    <div
+                      role="menu"
+                      className="absolute right-0 top-full z-30 mt-1 w-64 rounded-md border border-border bg-card p-1 shadow-lg"
+                    >
+                      <label
+                        className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-2 text-xs hover:bg-muted"
+                        title="For merges where both parents are on the same branch, hide the longer of the two parent edges"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={hideLongSelfEdge}
+                          onChange={(e) => setHideLongSelfEdge(e.target.checked)}
+                          className="mt-0.5 size-3.5 shrink-0 accent-primary"
+                        />
+                        <span>
+                          <span className="block font-medium">Trim self-merges</span>
+                          <span className="block text-[11px] text-muted-foreground">Hide the longer edge of same-branch merges</span>
+                        </span>
+                      </label>
+                      <label
+                        className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-2 text-xs hover:bg-muted"
+                        title="Hide merge commits where neither parent edge is connected (e.g. the source branch was deleted)"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={hideOrphanMerges}
+                          onChange={(e) => setHideOrphanMerges(e.target.checked)}
+                          className="mt-0.5 size-3.5 shrink-0 accent-primary"
+                        />
+                        <span>
+                          <span className="block font-medium">Hide orphan merges</span>
+                          <span className="block text-[11px] text-muted-foreground">Hide merges with no connected edges</span>
+                        </span>
+                      </label>
+                      <label
+                        className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-2 text-xs hover:bg-muted"
+                        title="Collapse merges and commits into a single node per branch per day"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={collapseDay}
+                          onChange={(e) => setCollapseDay(e.target.checked)}
+                          className="mt-0.5 size-3.5 shrink-0 accent-primary"
+                        />
+                        <span>
+                          <span className="block font-medium">One cluster/day</span>
+                          <span className="block text-[11px] text-muted-foreground">Single node per branch per day</span>
+                        </span>
+                      </label>
+                    </div>
+                  )}
+                </div>
                 <div className="flex items-center gap-2" title="Day column spacing (x-axis gap)">
                   <span className="text-[11px] text-muted-foreground">X-gap</span>
                   <input
@@ -777,6 +862,7 @@ export default function App() {
                 colW={colW}
                 hideLongSelfEdge={hideLongSelfEdge}
                 collapseDay={collapseDay}
+                hideOrphanMerges={hideOrphanMerges}
               />
             )}
           </div>

@@ -439,7 +439,7 @@ function pruneLongSelfMergeEdges(pts) {
   return pts.filter((_, i) => !drop.has(i))
 }
 
-export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHashes, selectedAuthors, jumpTo, showTags, rangeStart, rangeEnd, onViewChange, fitKey, colW = DEFAULT_COL_W, hideLongSelfEdge = false, collapseDay = false }) {
+export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHashes, selectedAuthors, jumpTo, showTags, rangeStart, rangeEnd, onViewChange, fitKey, colW = DEFAULT_COL_W, hideLongSelfEdge = true, collapseDay = true, hideOrphanMerges = true }) {
   const wrapRef = useRef(null)
   const svgRef = useRef(null)
   const zoomRef = useRef(d3.zoomIdentity)
@@ -484,10 +484,29 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     if (!graph?.branches?.length || size.w < 80 || size.h < 80) return
 
     const branches = [...new Set(graph.branches.map(laneName))]
-    const commits = graph.commits.map((c) => ({ ...c, branch: laneName(c.branch), on: (c.on || [c.branch]).map(laneName) })).filter((c) => branches.includes(c.branch))
+    let commits = graph.commits.map((c) => ({ ...c, branch: laneName(c.branch), on: (c.on || [c.branch]).map(laneName) })).filter((c) => branches.includes(c.branch))
+    let merges = (graph.merges || []).map((m) => ({ ...m, sourceBranch: laneName(m.sourceBranch), targetBranch: laneName(m.targetBranch) }))
+    if (hideOrphanMerges) {
+      // Same orphan rule as the sidebar counts: a merge with no parent in the
+      // loaded set and no loaded child pointing at it has no drawable edge
+      // (typically the merged branch was deleted).
+      const hashSet = new Set(commits.map((c) => c.hash))
+      const hasChild = new Set()
+      for (const c of commits) {
+        for (const p of c.parents || []) {
+          if (hashSet.has(p)) hasChild.add(p)
+        }
+      }
+      const orphan = new Set(
+        commits.filter((c) => c.isMerge && !(c.parents || []).some((p) => hashSet.has(p)) && !hasChild.has(c.hash)).map((c) => c.hash),
+      )
+      if (orphan.size) {
+        commits = commits.filter((c) => !orphan.has(c.hash))
+        merges = merges.filter((m) => !orphan.has(m.hash))
+      }
+    }
     const clusterMap = clusterByDay(commits, collapseDay)
     const clusters = [...clusterMap.values()]
-    const merges = (graph.merges || []).map((m) => ({ ...m, sourceBranch: laneName(m.sourceBranch), targetBranch: laneName(m.targetBranch) }))
     const mergeNodeByHash = new Map()
     const dayClusterByKey = new Map()
     for (const g of clusters) {
@@ -791,7 +810,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     return () => {
       d3.select(svgEl).on(".zoom", null).on("dblclick", null)
     }
-  }, [graph, related, size, selectedHash, matchHashes, selectedAuthors, jumpTo, onSelect, showTags, fitKey, colW, hideLongSelfEdge, collapseDay])
+  }, [graph, related, size, selectedHash, matchHashes, selectedAuthors, jumpTo, onSelect, showTags, fitKey, colW, hideLongSelfEdge, collapseDay, hideOrphanMerges])
 
   const branches = graph?.branches || []
 
