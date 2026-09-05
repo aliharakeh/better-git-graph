@@ -137,6 +137,8 @@ export default function App() {
   const [jumpTo, setJumpTo] = useState(null)
   const [fitKey, setFitKey] = useState(0)
   const [colW, setColW] = useState(200)
+  const [rowH, setRowH] = useState(88)
+  const [edgeRatio, setEdgeRatio] = useState(0.08)
   const [hideLongSelfEdge, setHideLongSelfEdge] = useState(true)
   const [hideOrphanMerges, setHideOrphanMerges] = useState(true)
   const [collapseDay, setCollapseDay] = useState(true)
@@ -792,6 +794,54 @@ export default function App() {
                     }}
                   />
                 </div>
+                <div className="flex items-center gap-2" title="Vertical spacing between branch lanes">
+                  <span className="text-[11px] text-muted-foreground">Y-gap</span>
+                  <input
+                    type="range"
+                    min={40}
+                    max={200}
+                    step={4}
+                    value={rowH}
+                    onChange={(e) => setRowH(Number(e.target.value))}
+                    className="w-24 accent-primary"
+                  />
+                  <Input
+                    className="h-8 w-16 px-2 text-xs tabular-nums"
+                    type="number"
+                    min={24}
+                    max={280}
+                    step={4}
+                    value={rowH}
+                    onChange={(e) => {
+                      const v = Number(e.target.value)
+                      if (!Number.isNaN(v)) setRowH(Math.min(280, Math.max(24, Math.round(v))))
+                    }}
+                  />
+                </div>
+                <div className="flex items-center gap-2" title="How far overlapping edges bow, as a fraction of edge length">
+                  <span className="text-[11px] text-muted-foreground">Overlap</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={0.4}
+                    step={0.01}
+                    value={edgeRatio}
+                    onChange={(e) => setEdgeRatio(Number(e.target.value))}
+                    className="w-24 accent-primary"
+                  />
+                  <Input
+                    className="h-8 w-16 px-2 text-xs tabular-nums"
+                    type="number"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={edgeRatio}
+                    onChange={(e) => {
+                      const v = Number(e.target.value)
+                      if (!Number.isNaN(v)) setEdgeRatio(Math.min(1, Math.max(0, v)))
+                    }}
+                  />
+                </div>
                 <div className="flex items-center gap-1">
                   <div className="relative w-52">
                     <Search className="pointer-events-none absolute left-2.5 top-2 size-4 text-muted-foreground" />
@@ -860,6 +910,8 @@ export default function App() {
                 onViewChange={onViewChange}
                 fitKey={fitKey}
                 colW={colW}
+                rowH={rowH}
+                edgeRatio={edgeRatio}
                 hideLongSelfEdge={hideLongSelfEdge}
                 collapseDay={collapseDay}
                 hideOrphanMerges={hideOrphanMerges}

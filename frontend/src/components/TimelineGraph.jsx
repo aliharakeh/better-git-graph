@@ -7,8 +7,8 @@ const DEFAULT_COL_W = 200
 const START_R = 18
 const MARGIN = { top: 48, right: 56, bottom: 36, left: 36 }
 
-function viewAt(width, height, x, y) {
-  const ty = y > height - LANE_H ? height / 2 - y : 0
+function viewAt(width, height, x, y, laneH) {
+  const ty = y > height - laneH ? height / 2 - y : 0
   return d3.zoomIdentity.translate(width - MARGIN.right - x, ty)
 }
 
@@ -223,7 +223,7 @@ function edgeCurve(x1, y1, x2, y2, bend = 0) {
     // Same-lane hump must respect the track offset, otherwise all parallel
     // same-lane edges draw the identical hump and overlap exactly.
     const dir = dx >= 0 ? -1 : 1
-    const h = dir * (bend ? Math.min(Math.abs(bend), 52) : 26)
+    const h = dir * (bend || 26)
     return `M ${x1} ${y1} C ${x1 + dx / 3} ${y1 + h}, ${x1 + (2 * dx) / 3} ${y2 + h}, ${x2} ${y2}`
   }
   const mx = (x1 + x2) / 2 + bend
@@ -439,7 +439,7 @@ function pruneLongSelfMergeEdges(pts) {
   return pts.filter((_, i) => !drop.has(i))
 }
 
-export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHashes, selectedAuthors, jumpTo, showTags, rangeStart, rangeEnd, onViewChange, fitKey, colW = DEFAULT_COL_W, hideLongSelfEdge = true, collapseDay = true, hideOrphanMerges = true }) {
+export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHashes, selectedAuthors, jumpTo, showTags, rangeStart, rangeEnd, onViewChange, fitKey, colW = DEFAULT_COL_W, rowH = LANE_H, edgeRatio = 0.08, hideLongSelfEdge = true, collapseDay = true, hideOrphanMerges = true }) {
   const wrapRef = useRef(null)
   const svgRef = useRef(null)
   const zoomRef = useRef(d3.zoomIdentity)
@@ -542,9 +542,10 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     const width = size.w
     const height = size.h
     const cw = Number(colW) || DEFAULT_COL_W
+    const laneH = Number(rowH) || LANE_H
     const yOf = (name) => {
       const i = branches.indexOf(name)
-      return i < 0 ? undefined : MARGIN.top + i * LANE_H + LANE_H / 2
+      return i < 0 ? undefined : MARGIN.top + i * laneH + laneH / 2
     }
     const xBase = (ts) => MARGIN.left + (dayIndex.get(localDay(ts)) ?? 0) * cw
     // Merge nodes sit exactly on the day's vertical line (offset 0);
@@ -558,7 +559,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       return ((d._slot || 0) - center) * step
     }
     const xOfNode = (d) => xBase(d.timestamp) + slotOffset(d)
-    const plotBottom = MARGIN.top + Math.max(branches.length, 1) * LANE_H
+    const plotBottom = MARGIN.top + Math.max(branches.length, 1) * laneH
     const dim = (branch) => (related && !related.has(branch) ? 0.12 : 1)
     const firstX = MARGIN.left
     const lastX = MARGIN.left + Math.max(days.length - 1, 0) * cw
@@ -567,7 +568,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       if (+new Date(g.timestamp) > +new Date(latest.timestamp)) latest = g
     }
     const latestView = latest
-      ? viewAt(width, height, xOfNode(latest), yOf(latest.branch) ?? height / 2)
+      ? viewAt(width, height, xOfNode(latest), yOf(latest.branch) ?? height / 2, laneH)
       : d3.zoomIdentity
 
     if (zoomKeyRef.current !== fitKey) {
@@ -630,7 +631,8 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
       const sameDay = localDay(p.e.src.timestamp) === localDay(p.e.dst.timestamp)
       const merge = !p.fork && p.e.src.branch !== p.e.dst.branch
       const sameLane = Math.abs(p.y2 - p.y1) < 6
-      const bend = 26 + signedTrack(tracks[i]) * 16
+      const span = Math.hypot(p.x2 - p.x1, p.y2 - p.y1)
+      const bend = 26 + signedTrack(tracks[i]) * span * (Number(edgeRatio) || 0)
       const q = shorten(p.x1, p.y1, p.x2, p.y2, p.r1, p.r2)
       let d
       if (p.fork) {
@@ -810,7 +812,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     return () => {
       d3.select(svgEl).on(".zoom", null).on("dblclick", null)
     }
-  }, [graph, related, size, selectedHash, matchHashes, selectedAuthors, jumpTo, onSelect, showTags, fitKey, colW, hideLongSelfEdge, collapseDay, hideOrphanMerges])
+  }, [graph, related, size, selectedHash, matchHashes, selectedAuthors, jumpTo, onSelect, showTags, fitKey, colW, rowH, edgeRatio, hideLongSelfEdge, collapseDay, hideOrphanMerges])
 
   const branches = graph?.branches || []
 
