@@ -24,6 +24,7 @@ type CommitNode struct {
 	IsMerge   bool     `json:"isMerge"`
 	Tags      []string `json:"tags,omitempty"`
 	Lanes     []string `json:"lanes,omitempty"`
+	Seq       int      `json:"-"` // position in the git log output; internal only
 }
 
 type MergeEvent struct {
@@ -67,6 +68,7 @@ type rawCommit struct {
 	assigned bool
 	on       []string
 	fp       []string
+	seq      int
 }
 
 var (
@@ -164,6 +166,7 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 			IsMerge:   len(c.parents) > 1,
 			Tags:      tagByHash[c.hash],
 			Lanes:     laneList(c),
+			Seq:       c.seq,
 		})
 		if len(c.parents) < 2 {
 			continue
@@ -218,10 +221,16 @@ func loadGraphAt(path string, only []string, since, until time.Time) (*RepoGraph
 
 	sort.Slice(nodes, func(i, j int) bool {
 		if nodes[i].Timestamp == nodes[j].Timestamp {
+			// git log --topo-order emits children before parents; the ascending
+			// display list wants the reverse as its tiebreak.
+			if nodes[i].Seq != nodes[j].Seq {
+				return nodes[i].Seq > nodes[j].Seq
+			}
 			return nodes[i].Hash < nodes[j].Hash
 		}
 		return nodes[i].Timestamp < nodes[j].Timestamp
 	})
+	fixTopoOrder(nodes)
 	sort.Slice(merges, func(i, j int) bool {
 		return merges[i].Timestamp < merges[j].Timestamp
 	})
@@ -396,11 +405,11 @@ func filterTips(tips map[string]string, want []string) map[string]string {
 }
 
 func listCommits(root string) (map[string]*rawCommit, error) {
-	return parseLog(gitOutput(root, "log", "--pretty=format:%H%x1f%P%x1f%an%x1f%aI%x1f%s", "--all"))
+	return parseLog(gitOutput(root, "log", "--topo-order", "--pretty=format:%H%x1f%P%x1f%an%x1f%aI%x1f%s", "--all"))
 }
 
 func listCommitsRange(root string, since, until time.Time) (map[string]*rawCommit, error) {
-	return parseLog(gitOutput(root, rangeLogArgs("--all", since, until)...))
+	return parseLog(gitOutput(root, rangeLogArgs("--all", since, until, "--topo-order")...))
 }
 
 func rangeLogArgs(tip string, since, until time.Time, extra ...string) []string {
@@ -415,6 +424,64 @@ func rangeLogArgs(tip string, since, until time.Time, extra ...string) []string 
 	return args
 }
 
+// fixTopoOrder nudges the ascending-time commit list so a parent is never
+// rendered after one of its children. Skewed author dates (rebases,
+// cherry-picks) would otherwise draw child-to-parent edges backwards.
+// Timestamp order is preserved wherever topology allows it.
+func fixTopoOrder(nodes []CommitNode) {
+	pos := make(map[string]int, len(nodes))
+	for i, n := range nodes {
+		pos[n.Hash] = i
+	}
+	waiting := make(map[string]int, len(nodes)) // hash -> parents not yet emitted
+	kids := make(map[string][]string, len(nodes))
+	for _, n := range nodes {
+		for _, p := range n.Parents {
+			if _, ok := pos[p]; ok {
+				waiting[n.Hash]++
+				kids[p] = append(kids[p], n.Hash)
+			}
+		}
+	}
+	var ready []int
+	push := func(i int) {
+		at := sort.SearchInts(ready, i)
+		ready = append(ready, 0)
+		copy(ready[at+1:], ready[at:])
+		ready[at] = i
+	}
+	for i, n := range nodes {
+		if waiting[n.Hash] == 0 {
+			push(i)
+		}
+	}
+	out := make([]CommitNode, 0, len(nodes))
+	for len(ready) > 0 {
+		i := ready[0]
+		ready = ready[1:]
+		n := nodes[i]
+		out = append(out, n)
+		for _, k := range kids[n.Hash] {
+			waiting[k]--
+			if waiting[k] == 0 {
+				push(pos[k])
+			}
+		}
+	}
+	if len(out) < len(nodes) {
+		emitted := make(map[string]bool, len(out))
+		for _, n := range out {
+			emitted[n.Hash] = true
+		}
+		for _, n := range nodes {
+			if !emitted[n.Hash] {
+				out = append(out, n)
+			}
+		}
+	}
+	copy(nodes, out)
+}
+
 func parseLog(out string, err error) (map[string]*rawCommit, error) {
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "does not have any commits") {
@@ -426,6 +493,7 @@ func parseLog(out string, err error) (map[string]*rawCommit, error) {
 	if out == "" {
 		return commits, nil
 	}
+	seq := 0
 	for _, line := range strings.Split(out, "\n") {
 		parts := strings.SplitN(line, "\x1f", 5)
 		if len(parts) < 4 {
@@ -452,7 +520,9 @@ func parseLog(out string, err error) (map[string]*rawCommit, error) {
 			author:  parts[2],
 			at:      at,
 			subject: subject,
+			seq:     seq,
 		}
+		seq++
 	}
 	return commits, nil
 }

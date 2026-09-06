@@ -47,7 +47,9 @@ function clusterByDay(commits, collapseDay = false) {
       arr.push(c)
     }
     for (const [key, arr] of byDay.entries()) {
-      const sorted = arr.slice().sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp) || String(a.hash).localeCompare(String(b.hash)))
+      // _i keeps the backend's topo-repaired order; timestamp re-sorts would
+      // undo it for skewed author dates (rebases, cherry-picks).
+      const sorted = arr.slice().sort((a, b) => (a._i ?? 0) - (b._i ?? 0))
       const first = sorted[0]
       const last = sorted[sorted.length - 1]
       const g = {
@@ -110,8 +112,8 @@ function clusterByDay(commits, collapseDay = false) {
   for (const [dayKey, arr] of normalsByDay.entries()) {
     const dayMerges = (mergesByDay.get(dayKey) || [])
       .slice()
-      .sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp) || String(a.hash).localeCompare(String(b.hash)))
-    const sorted = arr.slice().sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp) || String(a.hash).localeCompare(String(b.hash)))
+      .sort((a, b) => (a._i ?? 0) - (b._i ?? 0))
+    const sorted = arr.slice().sort((a, b) => (a._i ?? 0) - (b._i ?? 0))
     // Bucket each normal commit by how many of the day's merges precede it.
     const segments = dayMerges.length ? Array.from({ length: dayMerges.length + 1 }, () => []) : [[]]
     if (!dayMerges.length) {
@@ -151,7 +153,7 @@ function clusterByDay(commits, collapseDay = false) {
     })
   }
   for (const g of map.values()) {
-    g.commits.sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp))
+    g.commits.sort((a, b) => (a._i ?? 0) - (b._i ?? 0))
   }
   // Assign intra-day x offsets in true time order. Nodes sharing a
   // (branch, day) column are sorted by timestamp left-to-right; when the
@@ -169,7 +171,7 @@ function clusterByDay(commits, collapseDay = false) {
     arr.push(g)
   }
   for (const arr of groups.values()) {
-    arr.sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp) || String(a.hash).localeCompare(String(b.hash)))
+    arr.sort((a, b) => (a._i ?? 0) - (b._i ?? 0))
     const n = arr.length
     const mergeIdx = arr.map((g, i) => (g.isSingleMerge ? i : -1)).filter((i) => i >= 0)
     const center = mergeIdx.length ? mergeIdx.reduce((s, i) => s + i, 0) / mergeIdx.length : (n - 1) / 2
@@ -366,7 +368,7 @@ function buildEdges(clusters, commits, branches, merges) {
   }
   if (!linked) {
     d3.group(clusters, (c) => c.branch).forEach((nodes) => {
-      nodes.sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp))
+      nodes.sort((a, b) => (a._i ?? 0) - (b._i ?? 0))
       for (let i = 1; i < nodes.length; i++) addEdge(edges, nodes[i - 1], nodes[i], [nodes[i].branch], nodes[i])
     })
     for (const m of merges) {
@@ -484,7 +486,7 @@ export function TimelineGraph({ graph, focused, onSelect, selectedHash, matchHas
     if (!graph?.branches?.length || size.w < 80 || size.h < 80) return
 
     const branches = [...new Set(graph.branches.map(laneName))]
-    let commits = graph.commits.map((c) => ({ ...c, branch: laneName(c.branch), on: (c.on || [c.branch]).map(laneName) })).filter((c) => branches.includes(c.branch))
+    let commits = graph.commits.map((c, i) => ({ ...c, _i: i, branch: laneName(c.branch), on: (c.on || [c.branch]).map(laneName) })).filter((c) => branches.includes(c.branch))
     let merges = (graph.merges || []).map((m) => ({ ...m, sourceBranch: laneName(m.sourceBranch), targetBranch: laneName(m.targetBranch) }))
     if (hideOrphanMerges) {
       // Same orphan rule as the sidebar counts: a merge with no parent in the
